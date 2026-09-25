@@ -21,8 +21,8 @@ DRIVER = BUILD / "driver"
 # demosaicing; sRGB adds the color model, where DNG differs by design: LibRaw
 # uses the D65 ColorMatrix alone, luce-raw the DNG SDK's interpolated matrices
 # and ForwardMatrix.
-MEAN_LIMIT = {"camera": 0.002, "dng": 0.012, "table": 0.004, "generic": 1.0}
-OUTLIER_LIMIT = {"camera": 0.002, "dng": 0.05, "table": 0.01, "generic": 1.0}
+MEAN_LIMIT = {"camera": 0.0005, "dng": 0.012, "table": 0.001, "generic": 1.0}
+OUTLIER_LIMIT = {"camera": 0.001, "dng": 0.05, "table": 0.001, "generic": 1.0}
 
 
 def header(path):

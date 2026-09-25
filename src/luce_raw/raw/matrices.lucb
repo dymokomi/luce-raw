@@ -41,9 +41,10 @@ func table_model(make: str, model: str) -> str:
         return (str)model.bytes[word + 1..]
     return model
 
-## Give `meta` its camera's matrix and levels from the tables, or the generic
-## matrix when the camera is not listed.
-func lookup_matrix(meta: Meta*):
+## Give `meta` its camera's matrix, and its levels when `levels`, from the
+## tables, or the generic matrix when the camera is not listed. A DNG without
+## color matrices takes the matrix only: its levels are its own.
+func lookup_matrix(meta: Meta*, levels: bool):
     let model = table_model(meta.make, meta.model)
     meta.profile = Profile(matrices = 1)
     meta.profile.color1 = [3.2404542, -1.5371385, -0.4985314, -0.9692660, 1.8760108, 0.0415560, 0.0556434, -0.2040259, 1.0572252]
@@ -52,12 +53,12 @@ func lookup_matrix(meta: Meta*):
         if not starts(model, entry.prefix):
             continue
         let stated = meta.black[0] != 0.0 or meta.mask[2] > meta.mask[0]
-        if entry.black > 0 or (entry.black < 0 and not stated):
+        if levels and (entry.black > 0 or (entry.black < 0 and not stated)):
             meta.black_rows = 1
             meta.black_columns = 1
             meta.black[0] = (f64)(entry.black if entry.black > 0 else -entry.black)
             meta.mask = [0, 0, 0, 0]
-        if entry.white > 0:
+        if levels and entry.white > 0:
             meta.white = [(f64)entry.white, (f64)entry.white, (f64)entry.white]
         if entry.xyz[0] != 0 or entry.xyz[4] != 0:
             for i: usize in 0..<9:

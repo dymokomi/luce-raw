@@ -161,14 +161,3 @@ inline func difference(reader: Bits*, table: const Huffman*) -> i32!:
     if (value & ((i32)1 << (category - 1))) == 0:
         return value - ((i32)1 << category) + 1
     return value
-
-## The signed difference a JPEG-style `length`-bit magnitude codes.
-func extend(reader: Bits*, length: u32) -> i32!:
-    if length == 0:
-        return 0
-    if length >= 16:
-        return -32768 if length == 16 else error(corrupt, "raw difference too long")
-    let value = (i32)(try reader.read(length))
-    if (value & ((i32)1 << (length - 1))) == 0:
-        return value - ((i32)1 << length) + 1
-    return value

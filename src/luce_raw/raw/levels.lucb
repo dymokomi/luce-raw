@@ -98,7 +98,7 @@ func normalize(meta: const Meta*, mosaic: const Mosaic*, look: const Development
     plane.data = try new u16[count *? nc else error(limit, "raw image size overflows")] in memory.heap
     errdefer plane.close()
     for i: usize in 0..<4:
-        plane.cfa[i] = (u8)meta.color(oy + i // 2, ox + i % 2)
+        plane.cfa[i] = (u8)meta.color(ox + i % 2, oy + i // 2)
     let horizontal = try delta_values(&meta.black_h, meta.width)
     defer release(horizontal)
     let vertical = try delta_values(&meta.black_v, meta.height)

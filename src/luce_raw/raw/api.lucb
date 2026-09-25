@@ -1,6 +1,6 @@
 #==============================================================================================
 #
-#   raw/api - detect, probe, decode, info and white balance
+#   raw/api - detect, probe, decode, info, white balance and sensor
 #
 #   DESCRIPTION:
 #       The public surface. parse recognises the format and fills a Meta; probe
@@ -28,8 +28,7 @@ func parse(file: const u8[]) -> Meta!:
         try parse_raf(file, &meta)
     else:
         let tree = try Tree.walk(file, 0, 0)
-        if let dng = try tree.holding(50706):
-            discard(dng)
+        if try tree.holding(50706) != none:
             try parse_dng(file, &meta, &tree)
         else:
             let holder = try tree.holding(271) else error(unsupported, "TIFF file names no camera maker")
@@ -51,7 +50,9 @@ func parse(file: const u8[]) -> Meta!:
             else:
                 error(unsupported, "raw files from this camera maker are not supported")
     if not meta.profile.dng:
-        lookup_matrix(&meta)
+        lookup_matrix(&meta, true)
+    elif meta.profile.matrices == 0:
+        lookup_matrix(&meta, false)
     try meta.settle()
     return meta
 
@@ -159,6 +160,7 @@ pub struct Sensor:
     pub var black: f64[4]
     pub var white: f64
 
+    ## Free the samples.
     pub mutating func close():
         if self.samples.length > 0:
             free(self.samples) in memory.heap

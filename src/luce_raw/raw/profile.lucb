@@ -41,8 +41,9 @@ func normalize_forward(m: f64[9]) -> f64[9]:
         out[i] = m[i] * d50[i // 3] / xyz[i // 3] if xyz[i // 3] != 0.0 else m[i]
     return out
 
-## The weight of the first calibration for white `xy`: one at or below the
-## cooler illuminant, zero at or above the warmer, linear in 1/T between.
+## How much the first calibration counts for white `xy`: the cooler
+## illuminant's matrix counts fully at or below its temperature, not at all at
+## or above the warmer one's, and linearly in 1/T between.
 func weight(profile: const Profile*, xy: f64[2]) -> f64:
     if profile.matrices < 2:
         return 1.0
@@ -114,8 +115,8 @@ func development(meta: const Meta*, temperature: f64, tint: f64) -> Development!
     let smallest = math.min(result.multipliers[0], math.min(result.multipliers[1], result.multipliers[2]))
     for i: usize in 0..<3:
         result.multipliers[i] /= smallest
-    let (kelvin, green) = temperature_of(xy)
-    result.balance = WhiteBalance(temperature = kelvin, tint = green, multipliers = result.multipliers)
+    let (kelvin, offset) = temperature_of(xy)
+    result.balance = WhiteBalance(temperature = kelvin, tint = offset, multipliers = result.multipliers)
     if profile.dng:
         let (to_camera, forward) = camera_matrices(profile, xy)
         var to_pcs: f64[9]

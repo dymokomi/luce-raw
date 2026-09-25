@@ -67,7 +67,8 @@ struct Meta:
     var flags: u64
     var slices: usize[3]
     var curve: u16[]
-    # Layout, relative to the raw frame (the active area) and then to it.
+    # Layout: the active area within the sensor, the default crop within the
+    # active area, and the filter colors from the active area's corner.
     var top: usize
     var left: usize
     var width: usize
@@ -97,9 +98,9 @@ struct Meta:
     var baseline_exposure: f64
     var orientation: u64 = 1
 
-    ## The color filter color at active-area row `y`, column `x`: 0 red,
+    ## The color filter color at active-area column `x`, row `y`: 0 red,
     ## 1 green, 2 blue.
-    func color(y: usize, x: usize) -> usize:
+    func color(x: usize, y: usize) -> usize:
         return (usize)self.cfa[(y & 1) * 2 + (x & 1)]
 
     ## Check the layout fits the sensor and fill the defaults a parser left.

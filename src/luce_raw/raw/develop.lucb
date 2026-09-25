@@ -3,11 +3,12 @@
 #   raw/develop - From the balanced plane to the Raster's linear RGB
 #
 #   DESCRIPTION:
-#       The plane is cut into tiles that worker threads take in turn (parallel.lucb). Each tile is
-#       demosaiced (AHD inside the five-pixel border, the border by averaging; or
-#       bilinear), multiplied by the camera-to-sRGB matrix and the exposure gain, and
-#       written through the orientation into the Raster's pixels. Tiles share
-#       nothing but the read-only plane, so the result does not depend on threads.
+#       The plane is cut into tiles that worker threads take in turn (parallel.lucb).
+#       Each tile is demosaiced (AHD inside the five-pixel border, the border by
+#       averaging; or bilinear), multiplied by the camera-to-sRGB matrix and the
+#       exposure gain, and written through the orientation into the Raster's pixels.
+#       Tiles share nothing but the read-only plane, so the result does not depend
+#       on the number of threads.
 #
 #==============================================================================================
 
