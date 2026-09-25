@@ -4,7 +4,7 @@ def package "luce-raw" {
     str version = "0.3.0"
     str kind = "package"
     str language = "luce-base"
-    str description = "Camera RAW decoding for Luce/Base: DNG, CR2, CR3, NEF, ARW, ORF, RW2, PEF and RAF (Bayer and X-Trans, compressed) to linear-light RGB, with AHD and Markesteijn demosaicing, camera color matrices, temperature/tint white balance, half-size and tiled develops, and embedded previews."
+    str description = "Camera RAW decoding for Luce/Base: DNG, CR2, CR3, NEF, ARW, ORF, RW2, PEF and RAF (Bayer and X-Trans) to linear RGB, with AHD and Markesteijn demosaicing, tiled and half-size develops, and embedded previews."
     str readme = "README.md"
 
     def export "raw" {
