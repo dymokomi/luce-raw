@@ -7,7 +7,8 @@
 #       orthogonal ones weighted twice the diagonal, as dcraw's lin_interpolate.
 #       border_pixel is dcraw's border_interpolate: an unweighted mean of the
 #       neighbours of each missing color, used where AHD lacks the pixels it reads.
-#       Both skip neighbours outside the plane, so they work at every edge.
+#       Both skip neighbours outside the plane, so they work at every edge, and
+#       both work on X-Trans, widening to 5×5 where a 3×3 lacks a color.
 #
 #==============================================================================================
 
@@ -29,6 +30,14 @@ func mosaic_pixel(plane: const Plane*, x: usize, y: usize, weighted: bool, out: 
             let w: u32 = ((u32)1 << ((u32)(dx == 1) + (u32)(dy == 1))) if weighted else 1
             sums[c] += (u32)plane.data[yy * plane.width + xx] * w
             weights[c] += w
+    # An X-Trans 3×3 can miss a color; widen to 5×5 for it.
+    for c: usize in 0..<3:
+        if weights[c] == 0 and c != own:
+            for yy in (0 if y < 2 else y - 2)..<(y + 3 if y + 3 <= plane.height else plane.height):
+                for xx in (0 if x < 2 else x - 2)..<(x + 3 if x + 3 <= plane.width else plane.width):
+                    if plane.color(xx, yy) == c:
+                        sums[c] += (u32)plane.data[yy * plane.width + xx]
+                        weights[c] += 1
     for c: usize in 0..<3:
         out[c] = (u16)(sums[c] // weights[c]) if weights[c] > 0 else 0
     out[own] = plane.data[y * plane.width + x]

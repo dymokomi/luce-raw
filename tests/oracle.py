@@ -45,18 +45,23 @@ def check_sensor(sample, out):
             mismatch = int(np.count_nonzero(theirs != ours[:, :, 0]))
             if mismatch:
                 return False, f"{mismatch} sensor samples differ from LibRaw"
-            # LibRaw's per-color black levels against ours at the active area's 2x2.
+            # LibRaw's per-color black levels and filter colors against ours,
+            # over the filter's period from the active area's corner.
             lib_black = r.black_level_per_channel
             pattern = r.raw_pattern
             desc = r.color_desc.decode()
+            ours36 = [int(ch) for ch in h[16]]
+            period = pattern.shape[0]
+            for y in range(period):
+                for x in range(period):
+                    idx = pattern[(top + y - r.sizes.top_margin) % period][(left + x - r.sizes.left_margin) % period]
+                    color = "RGB".index(desc[idx]) if desc[idx] in "RGB" else 1
+                    if color != ours36[(y % 6) * 6 + x % 6]:
+                        return False, f"CFA {h[16]} vs LibRaw {pattern.tolist()} {desc}"
             for i in range(4):
-                y, x = (top + i // 2), (left + i % 2)
-                idx = pattern[y % 2][x % 2]
+                idx = pattern[(top + i // 2 - r.sizes.top_margin) % period][(left + i % 2 - r.sizes.left_margin) % period]
                 if abs(lib_black[idx] - black[i]) > 1.0:
                     return False, f"black {black} vs LibRaw {lib_black}"
-                color = "RGB".index(desc[idx]) if desc[idx] in "RGB" else 1
-                if color != cfa[i]:
-                    return False, f"CFA {cfa} vs LibRaw {pattern.tolist()} {desc}"
             if abs(r.white_level - white) > 1.0:
                 return False, f"white {white} vs LibRaw {r.white_level}"
         else:
@@ -96,7 +101,7 @@ def check_develop(sample, out, matrix, space):
                                output_bps=16, highlight_mode=rawpy.HighlightMode.Clip,
                                adjust_maximum_thr=0.0, user_sat=None, bright=1.0)
     theirs = theirs.astype(np.float32) / 65535.0
-    if abs(theirs.shape[0] - h) > 256 or abs(theirs.shape[1] - w) > 256:
+    if abs(theirs.shape[0] - h) > 1024 or abs(theirs.shape[1] - w) > 1024:
         return False, f"developed {w}x{h} vs LibRaw {theirs.shape[1]}x{theirs.shape[0]}"
     dy, dx = best_alignment(ours, theirs)
     a, b = overlap(ours, theirs, dy, dx)

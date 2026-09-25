@@ -18,9 +18,10 @@ struct CameraColor:
     var white: i32
     var xyz: i32[9]
 
-## The table for a maker's name.
-func colors_for(make: str) -> const CameraColor[]:
+## The table for a maker's name; Ricoh-made Pentax bodies use Pentax's.
+func colors_for(make: str, model: str) -> const CameraColor[]:
     var none_found: const CameraColor[]
+    if starts(make, "RICOH") and starts(model, "PENTAX"): return pentax_colors
     if starts(make, "Canon"): return canon_colors
     if starts(make, "NIKON"): return nikon_colors
     if starts(make, "SONY"): return sony_colors
@@ -32,8 +33,11 @@ func colors_for(make: str) -> const CameraColor[]:
     if starts(make, "RICOH"): return ricoh_colors
     return none_found
 
-## The model name as the tables spell it: without a leading maker word.
+## The model name as the tables spell it: without a leading maker word
+## (or "PENTAX", which Ricoh-made bodies carry).
 func table_model(make: str, model: str) -> str:
+    if model.length > 7 and starts(model, "PENTAX "):
+        return (str)model.bytes[7..]
     var word: usize = 0
     while word < make.length and make.bytes[word] != ' ':
         word += 1
@@ -49,7 +53,7 @@ func lookup_matrix(meta: Meta*, levels: bool):
     meta.profile = Profile(matrices = 1)
     meta.profile.color1 = [3.2404542, -1.5371385, -0.4985314, -0.9692660, 1.8760108, 0.0415560, 0.0556434, -0.2040259, 1.0572252]
     meta.matrix = "generic"
-    for entry in colors_for(meta.make):
+    for entry in colors_for(meta.make, meta.model):
         if not starts(model, entry.prefix):
             continue
         let stated = meta.black[0] != 0.0 or meta.mask[2] > meta.mask[0]

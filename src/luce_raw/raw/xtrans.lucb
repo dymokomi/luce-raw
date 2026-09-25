@@ -1,0 +1,129 @@
+#==============================================================================================
+#
+#   raw/xtrans - Frank Markesteijn's demosaic for Fujifilm X-Trans sensors
+#
+#   DESCRIPTION:
+#       X-Trans repeats a 6×6 filter pattern whose greens form hexagons around the
+#       red and blue pixels. This is LibRaw's xtrans_interpolate with three passes:
+#       green is limited to the range of its hexagon (a sequential pre-pass over
+#       the whole plane), interpolated in four directions and refined twice, red
+#       and blue follow each direction, and each pixel averages the directions
+#       whose CIELAB derivatives are most homogeneous. Tiles carry a margin of at
+#       least eight pixels, so the result does not depend on where tiles fall;
+#       the eight-pixel border of the plane is filled by neighbour averages.
+#
+#==============================================================================================
+
+## The tile buffers' side: output tiles of `tile_size` plus sixteen pixels of
+## margin each way. Even, as the red-for-blue step requires.
+let xtrans_side: usize = 288
+let xtrans_margin: usize = 16
+let xtrans_directions: usize = 8
+
+## The hexagon offsets of each 3×3 phase (in plane and in tile coordinates),
+## the phase of the solitary greens, and each pixel's green range.
+struct Hexagons:
+    var plane: i64[72]
+    var tile: i64[72]
+    var solitary_row: usize
+    var solitary_col: usize
+    var low: u16[]
+    var high: u16[]
+
+    mutating func close():
+        if self.low.length > 0:
+            free(self.low) in memory.heap
+        if self.high.length > 0:
+            free(self.high) in memory.heap
+        self = Hexagons()
+
+## The color at (`x`, `y`), which may lie up to six pixels before the origin.
+inline func xcolor(plane: const Plane*, x: i64, y: i64) -> i64:
+    return (i64)plane.pattern[(usize)((y + 6) % 6) * 6 + (usize)((x + 6) % 6)]
+
+## Map the green hexagon around each non-green pixel and vice versa, and
+## limit each red and blue pixel's green to its hexagon's range.
+func hexagons_of(plane: const Plane*) -> Hexagons!:
+    let orth: i64[12] = [1, 0, 0, 1, -1, 0, 0, -1, 1, 0, 0, 1]
+    let patt: i64[32] = [0, 1, 0, -1, 2, 0, -1, 0, 1, 1, 1, -1, 0, 0, 0, 0, 0, 1, 0, -2, 1, 0, -2, 0, 1, 1, -2, -2, 1, -1, -1, 1]
+    var rings = Hexagons()
+    errdefer rings.close()
+    for i: usize in 0..<72:
+        rings.plane[i] = 32700
+        rings.tile[i] = 32700
+    let w = (i64)plane.width
+    for row: i64 in 0..<3:
+        for col: i64 in 0..<3:
+            var ng: i64 = 0
+            var d: usize = 0
+            while d < 10:
+                let g: i64 = 1 if xcolor(plane, col, row) == 1 else 0
+                if xcolor(plane, col + orth[d + 2], row + orth[d]) == 1:
+                    ng = 0
+                else:
+                    ng += 1
+                if ng == 4:
+                    rings.solitary_row = (usize)row
+                    rings.solitary_col = (usize)col
+                if ng == g + 1:
+                    for c: usize in 0..<8:
+                        let v = orth[d] * patt[(usize)g * 16 + c * 2] + orth[d + 1] * patt[(usize)g * 16 + c * 2 + 1]
+                        let h = orth[d + 2] * patt[(usize)g * 16 + c * 2] + orth[d + 3] * patt[(usize)g * 16 + c * 2 + 1]
+                        let slot = (usize)(row * 3 + col) * 8 + (c ^ ((usize)(g * 2) & d))
+                        rings.plane[slot] = h + v * w
+                        rings.tile[slot] = h + v * (i64)xtrans_side
+                d += 2
+    for i: usize in 0..<72:
+        if rings.plane[i] == 32700:
+            error(unsupported, "this X-Trans filter pattern is not supported")
+    rings.low = try new u16[plane.width * plane.height] in memory.heap
+    rings.high = try new u16[plane.width * plane.height] in memory.heap
+    try green_ranges(plane, &rings)
+    return rings
+
+## LibRaw's pass setting green1 and green3 to the minimum and maximum of each
+## non-green pixel's hexagon: a sequential walk that reuses a range for the
+## pixel below when the pattern lets it.
+func green_ranges(plane: const Plane*, rings: Hexagons*) -> !:
+    let w = (i64)plane.width
+    let h = (i64)plane.height
+    let p = plane.data
+    var row: i64 = 2
+    var retries: i64 = 0
+    while row < h - 2:
+        var col: i64 = 2
+        var low: u16 = 0xffff
+        var high: u16 = 0
+        while col < w - 2:
+            if xcolor(plane, col, row) == 1:
+                low = 0xffff
+                high = 0
+                col += 1
+                continue
+            let at = row * w + col
+            if high == 0:
+                let base = (usize)((row % 3) * 3 + col % 3) * 8
+                for c: usize in 0..<6:
+                    let value = p[(usize)(at + rings.plane[base + c])]
+                    if low > value:
+                        low = value
+                    if high < value:
+                        high = value
+            rings.low[(usize)at] = low
+            rings.high[(usize)at] = high
+            let phase = (row - (i64)rings.solitary_row) % 3
+            if phase == 1:
+                if row < h - 3:
+                    row += 1
+                    col -= 1
+            elif phase == 2:
+                low = 0xffff
+                high = 0
+                col += 2
+                if col < w - 3 and row > 2:
+                    row -= 1
+                    retries += 1
+                    if retries > w * h:
+                        error(corrupt, "X-Trans pattern walk does not end")
+            col += 1
+        row += 1

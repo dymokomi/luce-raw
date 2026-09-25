@@ -71,17 +71,18 @@ func parse_orf(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
     meta.crop_height = (usize)(try processing.uint(0x615))
 
 ## The EXIF CFAPattern (0xa302): a 2×2 repeat, then its colors from the
-## sensor's corner.
+## sensor's corner. Some cameras (the Pentax K-1) write the repeat's two
+## shorts big-endian in a little-endian file, so either order is accepted.
 func exif_cfa(exif: const Directory*, meta: Meta*) -> !:
     let pattern = try exif.find(0xa302) else return
     if pattern.count != 8:
         return
-    var reader = Reader(data = pattern.data, little = exif.little)
-    if try reader.uint(2) != 2 or try reader.uint(2) != 2:
+    let d = pattern.data
+    let two = (d[0] == 2 and d[1] == 0) or (d[0] == 0 and d[1] == 2)
+    if not two or d[2] != d[0] or d[3] != d[1]:
         error(unsupported, "only 2×2 color filter arrays are supported")
-    let codes = try reader.take(4)
     for p: usize in 0..<4:
-        meta.cfa[p] = codes[((meta.top + p // 2) % 2) * 2 + (meta.left + p % 2) % 2]
+        meta.cfa[p] = d[4 + ((meta.top + p // 2) % 2) * 2 + (meta.left + p % 2) % 2]
 
 ## dcraw's olympus_load_raw: adaptive-width differences from a predictor
 ## among each pixel's same-color neighbours.

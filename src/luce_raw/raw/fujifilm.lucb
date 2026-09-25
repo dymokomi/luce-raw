@@ -1,14 +1,15 @@
 #==============================================================================================
 #
-#   raw/fujifilm - Fujifilm RAF (Bayer sensors)
+#   raw/fujifilm - Fujifilm RAF, Bayer and X-Trans
 #
 #   DESCRIPTION:
 #       A RAF starts "FUJIFILM" and a big-endian header of offsets: an embedded JPEG
 #       whose EXIF names the camera and orientation, a directory of Fujifilm records
-#       (sizes, crop, layout; 0x131 marks an X-Trans sensor, which is not
-#       supported), and the raw block: a small TIFF whose 0xf000 directory gives the
-#       sensor size, bits, black levels, as-shot white balance and the samples.
-#       Uncompressed 12-bit samples come two per three bytes, little-endian.
+#       (sizes, crop, layout, and 0x131: the 6×6 X-Trans filter pattern), and the
+#       raw block: a small TIFF whose 0xf000 directory gives the sensor size, bits,
+#       black levels, as-shot white balance and the samples. Uncompressed samples
+#       are 12 bits two per three bytes, or 16-bit words, little-endian; compressed
+#       ones (header 0x4953) decode in fuji_compressed.lucb.
 #
 #==============================================================================================
 
@@ -40,8 +41,12 @@ func parse_raf(file: const u8[], meta: Meta*) -> !:
         let tag = try list.uint(2)
         let length = (usize)(try list.uint(2))
         var value = Reader(data = try list.take(length), little = false)
-        if tag == 0x131:
-            error(unsupported, "X-Trans RAF files are not supported")
+        if tag == 0x131 and length == 36:
+            # dcraw's xtrans_abs: the pattern's 36 entries, stored last first.
+            let codes = try value.take(36)
+            for k: usize in 0..<36:
+                meta.pattern[35 - k] = codes[k] & 3
+            meta.xtrans = true
         if tag == 0x130 and length >= 2:
             discard(try value.byte())
             if (try value.byte() & 8) == 0:
@@ -62,16 +67,32 @@ func parse_raf(file: const u8[], meta: Meta*) -> !:
     meta.bits = try depth(try raw.uint(0xf003, 12))
     meta.data_offset = (usize)(try raw.locate(try raw.uint(0xf007)))
     meta.data_size = (usize)(try raw.uint(0xf008))
-    if meta.bits != 12 or meta.data_size * 8 != meta.raw_width * meta.raw_height * 12:
-        error(unsupported, "only uncompressed 12-bit RAF files are supported")
-    meta.coding = .packed_little
+    let pixels = meta.raw_width * meta.raw_height
+    let data = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size)
+    if data.length >= 16 and data[0] == 0x49 and data[1] == 0x53:
+        # The compressed header's raw size replaces the directory's.
+        var params = try fuji_params(data)
+        meta.raw_width = try dimension(((u64)data[9] << 8) | (u64)data[10])
+        meta.raw_height = params.lines * 6
+        meta.bits = (usize)params.bits
+        params.close()
+        meta.coding = .fuji
+    elif meta.bits == 12 and meta.data_size * 8 == pixels * 12:
+        meta.coding = .packed_little
+    elif meta.data_size == pixels * 2:
+        meta.coding = .words
+    else:
+        error(unsupported, "this RAF coding is not supported")
     meta.cfa = [0, 1, 1, 2]
+    # LibRaw's white for Bayer bodies outside the X series (the GFX).
+    if not meta.xtrans and meta.coding != .packed_little and not starts(meta.model, "X-"):
+        meta.white = [15872.0, 15872.0, 15872.0]
     if let black = try raw.find(0xf00a):
-        if black.count >= 4:
-            meta.black_rows = 2
-            meta.black_columns = 2
-            for p: usize in 0..<4:
-                meta.black[p] = try black.real(p)
+        let side: usize = 6 if black.count == 36 else 2 if black.count == 4 else 1
+        meta.black_rows = side
+        meta.black_columns = side
+        for p in 0..<side * side:
+            meta.black[p] = try black.real(p)
     if let balance = try raw.find(0xf00e):
         if balance.count == 3:
             let g = try balance.real(0)
@@ -80,6 +101,12 @@ func parse_raf(file: const u8[], meta: Meta*) -> !:
             if r > 0.0 and g > 0.0 and b > 0.0:
                 meta.neutral = [g / r, 1.0, g / b]
                 meta.neutral_known = true
+
+## Sixteen-bit little-endian words, row after row.
+func unpack_words(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
+    let data = try binary.slice(file, (u64)meta.data_offset, (u64)(mosaic.data.length * 2))
+    for i in 0..<mosaic.data.length:
+        mosaic.data[i] = (u16)data[i * 2] | ((u16)data[i * 2 + 1] << 8)
 
 ## Twelve-bit samples two per three bytes: the little-endian 24-bit word's low
 ## half is the first pixel, its high half the second.

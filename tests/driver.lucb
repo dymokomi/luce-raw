@@ -1,6 +1,7 @@
 ## The test driver tests/run.py builds: it decodes a raw with this package and
 ## writes what it found for the Python checks to compare with LibRaw.
 ##   driver info FILE
+##   driver recognize FILE           whether it is developable, and a raw at all
 ##   driver sensor FILE OUT          u16 samples, then a text header OUT.txt
 ##   driver develop FILE OUT QUALITY CROP EXPOSURE [SPACE [TEMPERATURE TINT]]
 ##                                   f32 RGB rows, then OUT.txt with the size
@@ -41,6 +42,9 @@ pub func main(arguments: str[]) -> i32!:
     let command = arguments[1]
     let data = try files.read((c.str)arguments[2])
     defer free(data)
+    if command == "recognize":
+        print(f"detect {raw.detect(data)} recognize {raw.recognize(data)}\n")
+        return 0
     if command == "info":
         let about = try raw.info(data)
         let wb = about.as_shot
@@ -51,7 +55,10 @@ pub func main(arguments: str[]) -> i32!:
         defer found.close()
         let bytes = u8[]((u8*)found.samples.data, found.samples.length * 2)
         try files.write((c.str)arguments[3], bytes)
-        try text_file(arguments[3], f"{found.width} {found.height} {found.channels} {found.top} {found.left} {found.active_width} {found.active_height} {found.cfa[0]} {found.cfa[1]} {found.cfa[2]} {found.cfa[3]} {found.black[0]} {found.black[1]} {found.black[2]} {found.black[3]} {found.white}\n")
+        var pattern: u8[36]
+        for i: usize in 0..<36:
+            pattern[i] = found.pattern[i] + '0'
+        try text_file(arguments[3], f"{found.width} {found.height} {found.channels} {found.top} {found.left} {found.active_width} {found.active_height} {found.cfa[0]} {found.cfa[1]} {found.cfa[2]} {found.cfa[3]} {found.black[0]} {found.black[1]} {found.black[2]} {found.black[3]} {found.white} {(str)pattern[0..]}\n")
         return 0
     var options = raw.Options()
     if command == "develop" or command == "bench":
@@ -67,7 +74,7 @@ pub func main(arguments: str[]) -> i32!:
             options.temperature = number(arguments[8])
             options.tint = number(arguments[9])
     if command == "develop":
-        var image = Raster()
+        var image = Raster(max_bytes = 8589934592, max_pixels = 1073741824)
         defer image.close()
         with memory.heap:
             image.encoded = try alloc u8[data.length]
@@ -85,7 +92,7 @@ pub func main(arguments: str[]) -> i32!:
         let repeat = (usize)number(arguments[3])
         var best: u64 = 0
         for i in 0..<repeat:
-            var image = Raster()
+            var image = Raster(max_bytes = 8589934592, max_pixels = 1073741824)
             defer image.close()
             with memory.heap:
                 image.encoded = try alloc u8[data.length]

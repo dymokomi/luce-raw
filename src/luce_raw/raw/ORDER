@@ -11,6 +11,8 @@ olympus.lucb
 panasonic.lucb
 pentax.lucb
 fujifilm.lucb
+fuji_compressed.lucb
+fuji_strips.lucb
 parallel.lucb
 unpack.lucb
 matrices.lucb
@@ -26,7 +28,11 @@ profile.lucb
 levels.lucb
 bilinear.lucb
 ahd.lucb
+xtrans.lucb
+xtrans_tile.lucb
+xtrans_steps.lucb
 develop.lucb
 api.lucb
+recognize.lucb
 tests_codec.lucb
 tests_dng.lucb

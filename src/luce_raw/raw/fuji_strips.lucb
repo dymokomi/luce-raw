@@ -1,0 +1,271 @@
+#==============================================================================================
+#
+#   raw/fuji_strips - Decoding Fujifilm's compressed strips
+#
+#   DESCRIPTION:
+#       Each strip decodes six sensor rows per step in six passes over pairs of line
+#       buffers; within a pass the even positions run eight samples ahead of the odd
+#       ones, which predict from the even neighbour to their right. A sample is
+#       either coded (a count of zero bits, then a remainder whose width adapts to
+#       the context's mean magnitude) or, on X-Trans, interpolated from the line
+#       above. After six passes the lines are laid into the mosaic by the filter
+#       pattern. `unpack_fuji` runs the strips in parallel.
+#
+#==============================================================================================
+
+## One pass: two line buffers, how each treats its even positions (0 coded,
+## 1 interpolated, 2 interpolated where pos & 3 == 0, 3 where pos & 3 == 2),
+## and the statistics set it uses.
+struct FujiPass:
+    var a: u8
+    var a_rule: u8
+    var b: u8
+    var b_rule: u8
+    var set: u8
+
+let xtrans_passes: FujiPass[6] = [
+    FujiPass(a = 2, a_rule = 1, b = 7, b_rule = 0, set = 0), FujiPass(a = 8, a_rule = 0, b = 15, b_rule = 1, set = 1),
+    FujiPass(a = 3, a_rule = 2, b = 9, b_rule = 1, set = 2), FujiPass(a = 10, a_rule = 0, b = 16, b_rule = 3, set = 0),
+    FujiPass(a = 4, a_rule = 3, b = 11, b_rule = 0, set = 1), FujiPass(a = 12, a_rule = 1, b = 17, b_rule = 2, set = 2)]
+let bayer_passes: FujiPass[6] = [
+    FujiPass(a = 2, a_rule = 0, b = 7, b_rule = 0, set = 0), FujiPass(a = 8, a_rule = 0, b = 15, b_rule = 0, set = 1),
+    FujiPass(a = 3, a_rule = 0, b = 9, b_rule = 0, set = 2), FujiPass(a = 10, a_rule = 0, b = 16, b_rule = 0, set = 0),
+    FujiPass(a = 4, a_rule = 0, b = 11, b_rule = 0, set = 1), FujiPass(a = 12, a_rule = 0, b = 17, b_rule = 0, set = 2)]
+
+inline func absolute(value: i32) -> i32:
+    return value if value >= 0 else -value
+
+## The bits of remainder a context wants: the smallest shift of its count
+## reaching its sum.
+inline func remainder_bits(sum: i32, count: i32) -> i32:
+    var bits: i32 = 0
+    if count < sum:
+        bits += 1
+        while bits <= 14 and (count << bits) < sum:
+            bits += 1
+    return bits
+
+## Decode one coded sample at `at` (index into the strip's lines) predicted as
+## `prediction`, with the gradient `grad` of its neighbours; `even` samples
+## scale their prediction down by four first. Returns the stored value.
+func fuji_code(strip: FujiStrip*, params: const FujiParams*, grads: FujiGrads*, quant_index: usize, grad: i32, prediction: i32) -> u16!:
+    let quant = strip.main if quant_index == 0 else params.quant[quant_index]
+    let gradient = (usize)absolute(grad)
+    let at = gradient * 2 if quant_index == 0 else ((quant_index - 1) * 5 + gradient) * 2
+    if (quant_index == 0 and gradient > 40) or (quant_index > 0 and gradient > 4):
+        error(corrupt, "Fujifilm compressed gradient out of range")
+    let sums: i32[] = grads.main[0..] if quant_index == 0 else grads.lossy[0..]
+    let zeros = try fuji_zeros(&strip.reader)
+    var code: i32 = 0
+    if zeros < strip.max_bits - quant.raw_bits - 1:
+        let bits = remainder_bits(sums[at], sums[at + 1])
+        code = try fuji_read(&strip.reader, bits) + (zeros << bits)
+    else:
+        code = try fuji_read(&strip.reader, quant.raw_bits) + 1
+    code = -1 - code // 2 if (code & 1) != 0 else code // 2
+    sums[at] += absolute(code)
+    if sums[at + 1] == params.min_value:
+        sums[at] >>= 1
+        sums[at + 1] >>= 1
+    sums[at + 1] += 1
+    let step = 2 * quant.base + 1
+    var value = prediction - code * step if grad < 0 else prediction + code * step
+    if value < -quant.base:
+        value += quant.total_values * step
+    elif value > quant.base + params.max_value:
+        value -= quant.total_values * step
+    return 0 if value < 0 else (u16)(value if value < params.max_value else params.max_value)
+
+## The quantization table for a sample whose neighbour differences sum to
+## `flatness`: a lossy fixed table in flat areas, else the main one.
+inline func fuji_table(strip: const FujiStrip*, params: const FujiParams*, flatness: i32) -> usize:
+    var i: usize = 1
+    while i < 4 and strip.main.base >= (i32)i:
+        if flatness <= params.quant[i].max_grad:
+            return i
+        i += 1
+    return 0
+
+## The class of a pair of differences in table `index`.
+inline func fuji_grad(strip: const FujiStrip*, params: const FujiParams*, index: usize, first: i32, second: i32) -> i32:
+    let table = strip.main.table if index == 0 else params.quant[index].table
+    let m = (usize)params.max_value
+    let quant = strip.main.grad_mult if index == 0 else params.quant[index].grad_mult
+    return quant * (i32)table[(usize)((i64)m + (i64)first)] + (i32)table[(usize)((i64)m + (i64)second)]
+
+## An even position: coded, or when `interpolate`, predicted only.
+func fuji_even(strip: FujiStrip*, params: const FujiParams*, line: usize, pos: usize, grads: FujiGrads*, interpolate: bool) -> !:
+    let w = params.line_width + 2
+    let at = line * w + 1 + pos
+    let l = strip.lines
+    let rb = (i32)l[at - w]
+    let rc = (i32)l[at - w - 1]
+    let rd = (i32)l[at - w + 1]
+    let rf = (i32)l[at - 2 * w]
+    let cb = absolute(rc - rb)
+    let fb = absolute(rf - rb)
+    let db = absolute(rd - rb)
+    let sum = rf + rd + 2 * rb if cb > fb and cb > db else rf + rc + 2 * rb if db > cb and db > fb else rd + rc + 2 * rb
+    if interpolate:
+        l[at] = (u16)(sum >> 2)
+        return
+    let index = fuji_table(strip, params, fb + cb)
+    let grad = fuji_grad(strip, params, index, rb - rf, rc - rb)
+    l[at] = try fuji_code(strip, params, grads, index, grad, sum >> 2)
+
+## An odd position, predicted from its left and right neighbours.
+func fuji_odd(strip: FujiStrip*, params: const FujiParams*, line: usize, pos: usize, grads: FujiGrads*) -> !:
+    let w = params.line_width + 2
+    let at = line * w + 1 + pos
+    let l = strip.lines
+    let ra = (i32)l[at - 1]
+    let rb = (i32)l[at - w]
+    let rc = (i32)l[at - w - 1]
+    let rd = (i32)l[at - w + 1]
+    let rg = (i32)l[at + 1]
+    let index = fuji_table(strip, params, absolute(rb - rc) + absolute(rc - ra))
+    let grad = fuji_grad(strip, params, index, rb - rc, rc - ra)
+    let prediction = (rg + ra + 2 * rb) >> 2 if (rb > rc and rb > rd) or (rb < rc and rb < rd) else (ra + rg) >> 1
+    l[at] = try fuji_code(strip, params, grads, index, grad, prediction)
+
+## Copy each line's edge from the line before, for lines `first` to `last`.
+func fuji_extend(strip: FujiStrip*, width: usize, first: usize, last: usize):
+    let w = width + 2
+    for line in first..=last:
+        strip.lines[line * w] = strip.lines[(line - 1) * w + 1]
+        strip.lines[line * w + width + 1] = strip.lines[(line - 1) * w + width]
+
+## The extension of the color group holding line `line`.
+func fuji_extend_group(strip: FujiStrip*, width: usize, line: usize):
+    if line <= 4:
+        fuji_extend(strip, width, 2, 4)
+    elif line <= 12:
+        fuji_extend(strip, width, 7, 12)
+    else:
+        fuji_extend(strip, width, 15, 17)
+
+## One step of six rows: the six passes.
+func fuji_block(strip: FujiStrip*, params: const FujiParams*) -> !:
+    let lw = params.line_width
+    for pass in (xtrans_passes if params.xtrans else bayer_passes):
+        let set = (usize)pass.set
+        var even: usize = 0
+        var odd: usize = 1
+        while even < lw or odd < lw:
+            if even < lw:
+                for side: usize in 0..<2:
+                    let line = (usize)(pass.a if side == 0 else pass.b)
+                    let rule = pass.a_rule if side == 0 else pass.b_rule
+                    let interpolate = rule == 1 or (rule == 2 and (even & 3) == 0) or (rule == 3 and (even & 3) == 2)
+                    try fuji_even(strip, params, line, even, &strip.even[set], interpolate)
+                even += 2
+            if even > 8:
+                try fuji_odd(strip, params, (usize)pass.a, odd, &strip.odd[set])
+                try fuji_odd(strip, params, (usize)pass.b, odd, &strip.odd[set])
+                odd += 2
+        fuji_extend_group(strip, lw, (usize)pass.a)
+        fuji_extend_group(strip, lw, (usize)pass.b)
+
+## Lay the six decoded rows of step `line` of strip `block` into the mosaic.
+func fuji_copy(strip: const FujiStrip*, params: const FujiParams*, meta: const Meta*, mosaic: Mosaic*, line: usize, block: usize, width: usize):
+    let w = params.line_width + 2
+    for row: usize in 0..<6:
+        let y = line * 6 + row
+        let target = y * mosaic.width + block * params.block_width
+        for p in 0..<width:
+            let color = meta.color(block * params.block_width + p, y)
+            let buffer = fuji_r2 + (row >> 1) if color == 0 else fuji_b2 + (row >> 1) if color == 2 else fuji_g2 + row
+            let index = ((((p * 2 // 3) & ~(usize)1) | ((p % 3) & 1)) + ((p % 3) >> 1)) if params.xtrans else p >> 1
+            mosaic.data[target + p] = strip.lines[buffer * w + 1 + index]
+
+## What `fuji_strip` reads: the strips' data and where to write.
+struct FujiJob:
+    var params: const FujiParams*
+    var meta: const Meta*
+    var mosaic: Mosaic*
+    var strips: const u8[]
+    var offsets: usize[17]
+    var q_bases: const u8[]
+
+## Decode strip `block`; strips write disjoint columns, so `parallel` may run them at once.
+func fuji_strip(context: void*, block: usize) -> !:
+    let job = (FujiJob*)context
+    let params = job.params
+    let lw = params.line_width
+    let w = lw + 2
+    var strip = FujiStrip(reader = Bits(data = job.strips[job.offsets[block]..<job.offsets[block + 1]]))
+    strip.lines = try new u16[fuji_lines * w] in memory.heap
+    defer free(strip.lines) in memory.heap
+    let table_size = (usize)2 << (usize)params.bits
+    let table = try new i8[table_size] in memory.heap
+    defer free(table) in memory.heap
+    strip.main = FujiQuant(table = table)
+    strip.max_bits = fuji_main_table(&strip.main, params.max_value, 0)
+    for set: usize in 0..<3:
+        for k: usize in 0..<3:
+            let spread = math.imax(2, (i64)((params.quant[k + 1].total_values + 0x20) >> 6))
+            for i: usize in 0..<5:
+                strip.even[set].lossy[(k * 5 + i) * 2] = (i32)spread
+                strip.even[set].lossy[(k * 5 + i) * 2 + 1] = 1
+                strip.odd[set].lossy[(k * 5 + i) * 2] = (i32)spread
+                strip.odd[set].lossy[(k * 5 + i) * 2 + 1] = 1
+    if params.lossless:
+        fuji_main_grads(&strip)
+    let width = params.block_width if block + 1 < params.blocks else job.mosaic.width - params.block_width * block
+    let step = (params.lines + 15) & ~(usize)15
+    # Lines 0 and 1 of each color take lines 3 and 4 (or 6 and 7) after each step.
+    let keep: usize[12] = [0, 3, 1, 4, 5, 11, 6, 12, 13, 16, 14, 17]
+    for line in 0..<params.lines:
+        if not params.lossless:
+            let base = (i32)job.q_bases[block * step + line]
+            if line == 0 or base != strip.main.base:
+                strip.max_bits = fuji_main_table(&strip.main, params.max_value, base)
+                fuji_main_grads(&strip)
+        try fuji_block(&strip, params)
+        for k: usize in 0..<6:
+            memory.copy(strip.lines[keep[k * 2] * w..], strip.lines[keep[k * 2 + 1] * w..], w)
+        fuji_copy(&strip, params, job.meta, job.mosaic, line, block, width)
+        for group: usize in 0..<3:
+            let first = fuji_r2 if group == 0 else fuji_g2 if group == 1 else fuji_b2
+            let count: usize = 6 if group == 1 else 3
+            for i in first * w..<(first + count) * w:
+                strip.lines[i] = 0
+            strip.lines[first * w] = strip.lines[(first - 1) * w + 1]
+            strip.lines[first * w + lw + 1] = strip.lines[(first - 1) * w + lw]
+
+## Reset every main context to the table's starting statistics.
+func fuji_main_grads(strip: FujiStrip*):
+    let spread = (i32)math.imax(2, (i64)((strip.main.total_values + 0x20) >> 6))
+    for set: usize in 0..<3:
+        for i: usize in 0..<41:
+            strip.even[set].main[i * 2] = spread
+            strip.even[set].main[i * 2 + 1] = 1
+            strip.odd[set].main[i * 2] = spread
+            strip.odd[set].main[i * 2 + 1] = 1
+
+## Fujifilm's compressed RAF: header, strip sizes, lossy bases, then strips.
+func unpack_fuji(file: const u8[], meta: const Meta*, mosaic: Mosaic*, threads: usize) -> !:
+    let data = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size)
+    var params = try fuji_params(data)
+    defer params.close()
+    if params.lines * 6 != mosaic.height or mosaic.width > params.blocks * params.block_width:
+        error(corrupt, "Fujifilm compressed header disagrees with the raw size")
+    var sizes = Reader(data = data, position = 16, little = false)
+    var job = FujiJob(params = &params, meta = meta, mosaic = mosaic)
+    var total: usize = 0
+    var lengths: usize[17]
+    for b in 0..<params.blocks:
+        lengths[b] = (usize)(try sizes.uint(4))
+    var at = 16 + ((4 * params.blocks + 15) & ~(usize)15)
+    if not params.lossless:
+        let count = params.blocks * ((params.lines + 15) & ~(usize)15)
+        job.q_bases = try binary.slice(data, (u64)at, (u64)count)
+        at += count
+    if at > data.length:
+        error(corrupt, "Fujifilm compressed data is truncated")
+    job.strips = data[at..]
+    for b in 0..<params.blocks:
+        job.offsets[b] = total
+        total = (usize)math.imin((i64)(total + lengths[b]), (i64)job.strips.length)
+    job.offsets[params.blocks] = total
+    try parallel(params.blocks, threads, (void*)&job, fuji_strip)

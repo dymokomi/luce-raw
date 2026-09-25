@@ -1,10 +1,10 @@
 #prisma 4.0
 def package "luce-raw" {
     str owner = "dymokomi"
-    str version = "0.1.0"
+    str version = "0.2.0"
     str kind = "package"
     str language = "luce-base"
-    str description = "Camera RAW decoding for Luce/Base: DNG, CR2, NEF, ARW, ORF, RW2, PEF and RAF to linear-light RGB, with AHD demosaicing, camera color matrices and temperature/tint white balance."
+    str description = "Camera RAW decoding for Luce/Base: DNG, CR2, NEF, ARW, ORF, RW2, PEF and RAF (Bayer and X-Trans, compressed) to linear-light RGB, with AHD and Markesteijn demosaicing, camera color matrices and temperature/tint white balance."
     str readme = "README.md"
 
     def export "raw" {

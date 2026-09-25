@@ -12,17 +12,20 @@
 #==============================================================================================
 
 ## Balanced, clipped sensor values: `width` × `height` pixels of `channels`
-## (one for a color filter mosaic whose 2×2 colors are `cfa`, three for LinearRaw).
+## (one for a color filter mosaic, three for LinearRaw). `pattern` is the 6×6
+## filter from the plane's corner; a Bayer filter's 2×2 is also `cfa`.
 struct Plane:
     var data: u16[]
     var width: usize
     var height: usize
     var channels: usize
     var cfa: u8[4]
+    var pattern: u8[36]
+    var xtrans: bool
 
     ## The filter color at (`x`, `y`).
     func color(x: usize, y: usize) -> usize:
-        return (usize)self.cfa[(y & 1) * 2 + (x & 1)]
+        return (usize)self.pattern[(y % 6) * 6 + x % 6]
 
     mutating func close():
         if self.data.length > 0:
@@ -81,7 +84,7 @@ func normalize_band(context: void*, index: usize) -> !:
             let pattern = (row_black + ax % columns) * nc
             let column_delta = job.horizontal[ax] if job.horizontal.length > 0 else 0.0
             for s in 0..<nc:
-                let color = s if nc == 3 else (usize)meta.cfa[(ay & 1) * 2 + (ax & 1)]
+                let color = s if nc == 3 else (usize)meta.pattern[(ay % 6) * 6 + ax % 6]
                 let black = meta.black[pattern + s] + row_delta + column_delta
                 let value = ((f64)job.mosaic.data[source + x * nc + s] - black) * job.scales[color]
                 plane.data[target + x * nc + s] = 65535 if value >= 65535.0 else u16(value) if value > 0.0 else 0
@@ -97,8 +100,11 @@ func normalize(meta: const Meta*, mosaic: const Mosaic*, look: const Development
     var plane = Plane(width = width, height = height, channels = nc)
     plane.data = try new u16[count *? nc else error(limit, "raw image size overflows")] in memory.heap
     errdefer plane.close()
+    plane.xtrans = meta.xtrans
+    for i: usize in 0..<36:
+        plane.pattern[i] = (u8)meta.color(ox + i % 6, oy + i // 6)
     for i: usize in 0..<4:
-        plane.cfa[i] = (u8)meta.color(ox + i % 2, oy + i // 2)
+        plane.cfa[i] = plane.pattern[(i // 2) * 6 + i % 2]
     let horizontal = try delta_values(&meta.black_h, meta.width)
     defer release(horizontal)
     let vertical = try delta_values(&meta.black_v, meta.height)

@@ -74,6 +74,7 @@ func parse_nef(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
     if meta.coding == .unpacked:
         meta.white = [(f64)(((u64)1 << (u64)(try depth(try raw.uint(258, 12)))) - 1), 0.0, 0.0]
     try cfa_from(&raw, meta)
+    meta.quarter_black = try raw.uint(258, 12) == 12 and not starts(model, "COOLPIX")
     for crop in nikon_crops:
         if model == crop.model:
             meta.left = (usize)crop.left

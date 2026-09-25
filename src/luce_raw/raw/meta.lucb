@@ -26,6 +26,8 @@ enum Coding:
     panasonic
     pentax
     packed_little
+    words
+    fuji
 
 ## The color facts of a camera: DNG's two calibrated matrices and their
 ## illuminants, or one D65 matrix from the table. Matrices are row-major 3×3;
@@ -68,7 +70,9 @@ struct Meta:
     var slices: usize[3]
     var curve: u16[]
     # Layout: the active area within the sensor, the default crop within the
-    # active area, and the filter colors from the active area's corner.
+    # active area, and the filter colors from the active area's corner: parsers
+    # set the 2×2 `cfa`, or `pattern` and `xtrans` for a 6×6 X-Trans filter;
+    # `settle` tiles a 2×2 into `pattern`, which the pixel stages use.
     var top: usize
     var left: usize
     var width: usize
@@ -78,6 +82,8 @@ struct Meta:
     var crop_width: usize
     var crop_height: usize
     var cfa: u8[4]
+    var xtrans: bool
+    var pattern: u8[36]
     var mosaic: bool = true
     # Levels, per position of a repeating black pattern within the active area.
     var black: f64[64]
@@ -89,6 +95,8 @@ struct Meta:
     # Masked sensor pixels (top, left, bottom, right in sensor coordinates)
     # whose per-position mean is the black level, when the file states none.
     var mask: usize[4]
+    # Nikon states 12-bit files' black levels on the 14-bit scale.
+    var quarter_black: bool
     # Color.
     var neutral: f64[3]
     var neutral_known: bool
@@ -101,7 +109,7 @@ struct Meta:
     ## The color filter color at active-area column `x`, row `y`: 0 red,
     ## 1 green, 2 blue.
     func color(x: usize, y: usize) -> usize:
-        return (usize)self.cfa[(y & 1) * 2 + (x & 1)]
+        return (usize)self.pattern[(y % 6) * 6 + x % 6]
 
     ## Check the layout fits the sensor and fill the defaults a parser left.
     mutating func settle() -> !:
@@ -120,8 +128,11 @@ struct Meta:
         if self.samples != 1 and self.samples != 3:
             error(unsupported, "raw sensors with other than one or three samples are not supported")
         if self.mosaic:
+            if not self.xtrans:
+                for i: usize in 0..<36:
+                    self.pattern[i] = self.cfa[((i // 6) & 1) * 2 + ((i % 6) & 1)]
             var seen: u8[3]
-            for c in self.cfa:
+            for c in self.pattern:
                 if c > 2:
                     error(unsupported, "raw color filter uses a color other than red, green or blue")
                 seen[(usize)c] = 1

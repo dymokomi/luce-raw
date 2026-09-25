@@ -5,31 +5,40 @@
 #   DESCRIPTION:
 #       A PEF is a TIFF with the raw in IFD0: uncompressed, or Huffman-coded JPEG-style
 #       differences from the pixel two columns left (compression 65535), with the
-#       code table in the maker note (tag 0x220). The maker note ("AOC\0" then a byte
-#       order) counts its offsets from the file and holds the black levels (0x200)
+#       code table in the maker note (tag 0x220). The maker note ("AOC\0" counting
+#       offsets from the file, or "PENTAX \0" counting from itself) holds the black levels (0x200)
 #       and white balance (0x201) in R, G, G, B order.
 #
 #==============================================================================================
 
-## Pentax sensors with masked columns: model prefix, raw width at least, left
-## margin and width kept, after LibRaw.
+## Pentax sensors with masked borders: model prefix, raw width, and the
+## image rectangle (a zero height runs to the bottom), after LibRaw.
 struct PentaxCrop:
     var model: str
     var raw_width: u16
     var left: u16
+    var top: u16
     var width: u16
+    var height: u16
 
-let pentax_crops: PentaxCrop[5] = [
-    PentaxCrop(model = "K-5", raw_width = 4960, left = 10, width = 4950),
-    PentaxCrop(model = "K-r", raw_width = 4352, left = 0, width = 4309),
-    PentaxCrop(model = "K-x", raw_width = 4352, left = 0, width = 4309),
-    PentaxCrop(model = "K-3 II", raw_width = 6080, left = 4, width = 6040),
-    PentaxCrop(model = "K-7", raw_width = 4736, left = 0, width = 4684)]
+let pentax_crops: PentaxCrop[12] = [
+    PentaxCrop(model = "K-3 Mark III", raw_width = 6304, left = 26, top = 34, width = 6224, height = 4160),
+    PentaxCrop(model = "K-3", raw_width = 6080, left = 4, top = 0, width = 6040, height = 0),
+    PentaxCrop(model = "K-70", raw_width = 6080, left = 60, top = 32, width = 6020, height = 4016),
+    PentaxCrop(model = "KF", raw_width = 6080, left = 56, top = 28, width = 6024, height = 4024),
+    PentaxCrop(model = "KP", raw_width = 6112, left = 54, top = 28, width = 6028, height = 0),
+    PentaxCrop(model = "K-1", raw_width = 7392, left = 6, top = 18, width = 7376, height = 0),
+    PentaxCrop(model = "K-5", raw_width = 4992, left = 10, top = 0, width = 4950, height = 0),
+    PentaxCrop(model = "K-r", raw_width = 4352, left = 0, top = 0, width = 4309, height = 0),
+    PentaxCrop(model = "K-x", raw_width = 4352, left = 0, top = 0, width = 4309, height = 0),
+    PentaxCrop(model = "K-7", raw_width = 4736, left = 0, top = 2, width = 4684, height = 3122),
+    PentaxCrop(model = "K20D", raw_width = 4864, left = 0, top = 0, width = 4688, height = 3124),
+    PentaxCrop(model = "K10D", raw_width = 3936, left = 0, top = 0, width = 3896, height = 2616)]
 
 ## Fill `meta` from a Pentax PEF.
 func parse_pef(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
     meta.format = "PEF"
-    meta.model = table_model(meta.make, meta.model)
+    let model = table_model(meta.make, meta.model)
     let main = try tree.at(0)
     meta.orientation = try main.uint(274, 1)
     meta.raw_width = try dimension(try main.uint(256))
@@ -52,18 +61,27 @@ func parse_pef(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
     else:
         error(unsupported, "this PEF compression is not supported")
     for crop in pentax_crops:
-        if starts(meta.model, crop.model) and meta.raw_width >= (usize)crop.raw_width:
+        if starts(model, crop.model) and meta.raw_width == (usize)crop.raw_width and meta.width == 0:
             meta.left = (usize)crop.left
+            meta.top = (usize)crop.top
             meta.width = (usize)crop.width
-            meta.height = meta.raw_height
+            meta.height = (usize)crop.height if crop.height > 0 else meta.raw_height - (usize)crop.top
     let exif = tree.exif else error(corrupt, "PEF has no EXIF directory")
     meta.cfa = [0, 1, 1, 2]
     try exif_cfa(&exif, meta)
     let note = try exif.find(37500) else error(corrupt, "PEF has no maker note")
-    if note.data.length < 10 or (str)note.data[..<4] != "AOC\0":
+    # "AOC\0" and a byte order, offsets from the file; or, on newer bodies,
+    # "PENTAX \0" and a byte order, offsets from the maker note.
+    var little = false
+    var maker = Directory(file = file, base = 0, offset = 0, count = 0)
+    if note.data.length > 10 and (str)note.data[..<4] == "AOC\0":
+        little = note.data[4] == 'I'
+        maker = try Directory.open(file, 0, note.position + 6, little)
+    elif note.data.length > 12 and (str)note.data[..<8] == "PENTAX \0":
+        little = note.data[8] == 'I'
+        maker = try Directory.open(file, (i64)note.position, note.position + 10, little)
+    else:
         error(unsupported, "PEF maker note has an unknown layout")
-    let little = note.data[4] == 'I'
-    let maker = try Directory.open(file, 0, note.position + 6, little)
     if let black = try maker.find(0x200):
         if black.count == 4:
             try canonical_black(meta, &black)

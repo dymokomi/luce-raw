@@ -210,3 +210,22 @@ test "detect accepts raws and refuses other files":
     var plain = try tiff.write(b"")
     defer plain.close()
     assert(not detect(plain.view()), "a plain TIFF was taken for a raw")
+
+test "recognize knows raws this package cannot develop, and probe names them":
+    var file = try synthetic_dng(false)
+    defer file.close()
+    assert(recognize(file.view()), "a DNG was not recognized")
+    var tiff = TiffOut()
+    try tiff.add(256, 4, [2])
+    try tiff.add(257, 4, [2])
+    try tiff.add(271, 2, [67, 97, 110, 111, 110, 0])
+    var plain = try tiff.write(b"")
+    defer plain.close()
+    assert(not recognize(plain.view()), "a Canon-made plain TIFF was taken for a raw")
+    let cr3 = b"\x00\x00\x00\x18ftypcrx \x00\x00\x00\x01crx isom"
+    assert(recognize(cr3) and not detect(cr3), "a CR3 was not recognized as an undevelopable raw")
+    var message = ""
+    discard(info(cr3) catch failure:
+        message = failure.message
+        recover Info())
+    assert(message == "Canon CR3 raws are not supported yet", "a CR3 did not fail with its own message")

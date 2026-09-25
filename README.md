@@ -1,10 +1,11 @@
 # luce-raw
 
 Camera RAW decoding for Luce/Base: DNG, Canon CR2, Nikon NEF, Sony ARW, Olympus ORF,
-Panasonic RW2, Pentax PEF and Fujifilm RAF (Bayer) into scene-linear RGB, in pure Luce
+Panasonic RW2, Pentax PEF and Fujifilm RAF (Bayer and X-Trans, uncompressed and
+compressed) into scene-linear RGB, in pure Luce
 Base with no platform codecs. It develops the sensor data the way a raw converter's
 open does: black and white levels, white balance, highlight clipping, AHD (or
-bilinear) demosaicing, the camera's color matrix into linear sRGB, baseline exposure
+bilinear) demosaicing — Markesteijn's for X-Trans — the camera's color matrix into linear sRGB, baseline exposure
 and orientation. The result is a luce-raster `Raster` with three float channels, R, G
 and B, where the sensor's white after white balance is 1.0.
 
@@ -21,7 +22,12 @@ try raw.decode(&image, options)                # image.pixels: linear sRGB, RGB 
 
 ## API (export `raw`, module `luce_raw.raw`)
 
-- `detect(data) -> bool`: whether the bytes are a raw this package reads (plain TIFFs are not).
+- `detect(data) -> bool`: whether this package can develop the bytes (plain TIFFs: false).
+- `recognize(data) -> bool`: whether the bytes are a camera raw at all, developable or
+  not (CR3, CRW, X3F, MRW, or a maker TIFF holding sensor data). When `detect` is false
+  and `recognize` true, `probe` and `decode` fail with a message saying what is not
+  supported (for example "Canon CR3 raws are not supported yet"), so an editor can
+  show that instead of treating the file as a plain TIFF.
 - `probe(image: Raster*, options = Options()) -> !`: sizes the Raster from
   `image.encoded`: the developed width and height (after the default crop and
   orientation), three `float32` channels, `file_format` ("DNG", "CR2", ...), and the
@@ -37,9 +43,11 @@ try raw.decode(&image, options)                # image.pixels: linear sRGB, RGB 
   convention (Robertson's isotemperature lines, tint positive towards magenta), so
   the as-shot numbers read like Camera Raw's.
 - `sensor(data) -> Sensor`: the raw sensor samples after the file's linearization,
-  with the active area, filter pattern, black and white levels.
+  with the active area, filter pattern (2×2 `cfa`, and the 6×6 `pattern` with an
+  `xtrans` flag), black and white levels.
 
-`Options`: `quality` (`.best` AHD, `.fast` bilinear), `temperature` and `tint` (zero
+`Options`: `quality` (`.best` AHD, or Markesteijn's three-pass X-Trans demosaic;
+`.fast` bilinear), `temperature` and `tint` (zero
 temperature keeps the as-shot balance), `exposure` (apply the baseline exposure,
 default on), `crop` (the camera's default crop, default on), `camera` (skip the color
 matrix: white-balanced camera RGB, for profiling), `threads` (zero: one per processor).
@@ -50,12 +58,12 @@ matrix: white-balanced camera RGB, for profiling), `threads` (zero: one per proc
 | --- | --- | --- |
 | DNG | uncompressed (8/16-bit and bit-packed), lossless JPEG (strips and tiles), Deflate (8/16-bit, horizontal predictors) | Bayer CFA of any 2×2 pattern and LinearRaw; LinearizationTable, BlackLevel with repeat patterns and row/column deltas, WhiteLevel, ActiveArea, DefaultCrop; AsShotNeutral or AsShotWhiteXY; ColorMatrix1/2 with CameraCalibration, AnalogBalance and ForwardMatrix1/2 interpolated for the white's temperature as the DNG SDK does, into XYZ D50 and by Bradford to sRGB; BaselineExposure (+ offset); Orientation |
 | Canon CR2 | lossless JPEG with slices | sensor rectangle from the maker note, black measured from the masked columns (or the color data's levels), as-shot white balance from the color data |
-| Nikon NEF | lossless and lossy Huffman (with the split-row trees), uncompressed and bit-packed | linearization curve, white balance and black level from the maker note |
+| Nikon NEF | lossless and lossy Huffman (with the split-row trees), uncompressed and bit-packed | linearization curve, white balance and black level from the maker note (quartered for 12-bit files, as Nikon states it on the 14-bit scale) |
 | Sony ARW | ARW2 (with the tone curve), uncompressed, lossless (JPEG tiles) | white balance and black from the encrypted SR2 sub-IFD, DefaultCrop |
 | Olympus ORF | compressed 12-bit, uncompressed | white balance, black, valid bits and crop from the ImageProcessing directory |
 | Panasonic RW2 | raw format 4 (the classic 14-pixels-in-16-bytes coding) | sensor borders, black (+15) and white balance from IFD0 |
-| Pentax PEF | Huffman, uncompressed | code table, black and white balance from the maker note |
-| Fujifilm RAF | uncompressed 12-bit Bayer | crop, black and white balance from the RAF records and raw block |
+| Pentax PEF | Huffman, uncompressed | code table, black and white balance from the maker note (both the "AOC" and the newer "PENTAX" layouts, as the K-1 writes), masked borders of recent bodies |
+| Fujifilm RAF | uncompressed (12-bit packed, 14/16-bit words), compressed lossless and lossy (Fujifilm's strip coding, as LibRaw's fuji_compressed) | Bayer and X-Trans (6×6 pattern from the RAF records), crop, 2×2 or 6×6 black levels and white balance from the raw block |
 
 Proprietary raws carry no calibrated matrix; `matrices_*.lucb` hold Adobe DNG
 Converter's XYZ(D65)-to-camera matrices with their black and white levels, as dcraw's
@@ -74,7 +82,9 @@ attribute are "generic".
    as 16-bit values — dcraw's and LibRaw's `scale_colors`.
 3. **Demosaic** in tiles on all processors: AHD (dcraw/LibRaw's integer
    implementation, homogeneity in CIELAB) inside a five-pixel border that is filled by
-   neighbour averages; or bilinear.
+   neighbour averages; for X-Trans, Markesteijn's three-pass algorithm as LibRaw's
+   `xtrans_interpolate(3)` inside an eight-pixel border; or bilinear, which also
+   handles X-Trans.
 4. **Color**: the balanced camera values to linear sRGB (DNG: the DNG SDK's model;
    tables: dcraw's `cam_xyz_coeff`), times 2^BaselineExposure, negative values clipped,
    written through the orientation.
@@ -110,7 +120,7 @@ components, restart intervals, 16-bit differences), Huffman tables and the bit
 reader on synthetic streams; synthetic DNGs (uncompressed and lossless JPEG) that
 must develop a flat field to one grey in every mode; the white balance round trip
 through temperature and tint; and truncated and corrupted inputs, which must fail
-with errors. The sample raws are CC0 files from raw.pixls.us, listed with their
+with errors. The sample raws come from raw.pixls.us (almost all CC0), listed with their
 SHA-256 in `tests/samples.json` and fetched into `build/samples` on first use; the
 oracle runs in a virtual environment under `build/venv`.
 
@@ -119,13 +129,15 @@ oracle runs in a virtual environment under `build/venv`.
 Developing a 24 MP raw on a 16-core Apple M-series machine (`--release`, probe and
 decode, file already in memory): 0.32–0.44 s for tiled DNG and for lossless,
 uncompressed and ARW2 Sony files; 0.6–0.7 s for NEF, CR2 and single-strip DNG, whose
-one entropy-coded stream decodes on a single thread. Bilinear (`fast`) saves
-0.15–0.2 s. Tiled decoding, levels and demosaicing use every processor.
+one entropy-coded stream decodes on a single thread. Compressed RAF decodes its
+strips in parallel; X-Trans at `best` takes about 2.1 s for 24 MP (Markesteijn's
+three passes in eight directions), 0.45 s at `fast`. Bilinear (`fast`) saves
+0.15–0.2 s on Bayer files. Tiled decoding, levels and demosaicing use every processor.
 
 ## Not supported yet
 
 Canon CR3 (CRX), CRW and sRAW/mRAW; Nikon HE/HE*; 14-bit Olympus/OM ORF; Panasonic
-raw formats 5–8 (GH5S, S1, GH6 and later); Fujifilm compressed RAF and X-Trans; Sony
+raw formats 5–8 (GH5S, S1, GH6 and later); Fujifilm SuperCCD (rotated) RAF; Sony
 ARW1 and Sony's newer lossy codings; floating-point and lossy-JPEG DNGs, DNG opcode
 lists (the lens-shading GainMaps phone DNGs rely on), DefaultScale, and filter
 patterns other than 2×2 RGB; embedded previews.

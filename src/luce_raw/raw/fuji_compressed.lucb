@@ -1,0 +1,200 @@
+#==============================================================================================
+#
+#   raw/fuji_compressed - Fujifilm's compressed RAF coding
+#
+#   DESCRIPTION:
+#       Since the X-Pro2 and X-T2, Fujifilm raws may be compressed, losslessly or
+#       lossily: the sensor is cut into vertical strips (768 columns) that decode
+#       independently, six rows at a time, into eighteen line buffers per strip
+#       (five red, eight green, five blue, each color's samples of a row packed
+#       together). Each sample is an adaptive Golomb-style code relative to a
+#       gradient-chosen prediction from the lines above; X-Trans files interpolate
+#       some positions instead of coding them. This follows LibRaw's
+#       fuji_compressed.cpp (Alexey Danilchenko's decoder) step for step.
+#
+#==============================================================================================
+
+## Line buffers of one strip: red 0-4, green 5-12, blue 13-17. Lines 0 and 1
+## of each color keep the previous six rows' last lines as context.
+let fuji_r2: usize = 2
+let fuji_g2: usize = 7
+let fuji_b2: usize = 15
+let fuji_lines: usize = 18
+
+## One quantization table: the gradient class of every difference.
+struct FujiQuant:
+    var table: i8[]
+    var base: i32
+    var max_grad: i32
+    var grad_mult: i32
+    var total_values: i32
+    var raw_bits: i32
+
+## What every strip shares: the header's facts and the lossy tables.
+struct FujiParams:
+    var quant: FujiQuant[4]
+    var tables: i8[]
+    var max_value: i32
+    var min_value: i32 = 0x40
+    var line_width: usize
+    var block_width: usize
+    var blocks: usize
+    var lines: usize
+    var bits: u32
+    var xtrans: bool
+    var lossless: bool
+
+    mutating func close():
+        if self.tables.length > 0:
+            free(self.tables) in memory.heap
+        self = FujiParams()
+
+## Adaptive statistics for one context: sum and count of magnitudes per
+## gradient class (41 classes, or 5 for each of the three lossy tables).
+struct FujiGrads:
+    var main: i32[82]
+    var lossy: i32[30]
+
+## The state of one strip being decoded.
+struct FujiStrip:
+    var reader: Bits
+    var even: FujiGrads[3]
+    var odd: FujiGrads[3]
+    var lines: u16[]
+    var main: FujiQuant
+    var max_bits: i32
+
+func log2ceil(value: i32) -> i32:
+    var result: i32 = 0
+    var v = value
+    if v != 0:
+        v -= 1
+        result += 1
+        v >>= 1
+        while v != 0:
+            result += 1
+            v >>= 1
+    return result
+
+## Fill `table` (2 × maximum + 1 entries) with the class of each difference.
+func fuji_qlut(table: i8[], q: i32[5]):
+    var at: usize = 0
+    var value = -q[4]
+    while value <= q[4]:
+        table[at] = -4 if value <= -q[3] else -3 if value <= -q[2] else -2 if value <= -q[1] else -1 if value < -q[0] else 0 if value <= q[0] else 1 if value < q[1] else 2 if value < q[2] else 3 if value < q[3] else 4
+        at += 1
+        value += 1
+
+## The main table for quantization base `base`, as init_main_qtable.
+func fuji_main_table(quant: FujiQuant*, max_value: i32, base: i32) -> i32:
+    var q: i32[5] = [base, 3 * base + 0x12, 5 * base + 0x43, 7 * base + 0x114, max_value]
+    let ceiling = max_value + 1
+    if q[1] >= ceiling or q[1] < base + 1:
+        q[1] = base + 1
+    if q[2] < q[1] or q[2] >= ceiling:
+        q[2] = q[1]
+    if q[3] < q[2] or q[3] >= ceiling:
+        q[3] = q[2]
+    fuji_qlut(quant.table, q)
+    quant.base = base
+    quant.max_grad = 0
+    quant.total_values = (q[4] + 2 * base) // (2 * base + 1) + 1
+    quant.raw_bits = log2ceil(quant.total_values)
+    quant.grad_mult = 9
+    return 4 * log2ceil(q[4] + 1)
+
+## Parse the 16-byte header at the start of the raw data.
+func fuji_params(data: const u8[]) -> FujiParams!:
+    var header = Reader(data = data, little = false)
+    let signature = try header.uint(2)
+    let lossless = try header.byte()
+    let kind = try header.byte()
+    let bits = (u32)(try header.byte())
+    let height = (usize)(try header.uint(2))
+    let rounded = (usize)(try header.uint(2))
+    let width = (usize)(try header.uint(2))
+    let block = (usize)(try header.uint(2))
+    let blocks = (usize)(try header.byte())
+    let lines = (usize)(try header.uint(2))
+    if signature != 0x4953 or lossless > 1 or height > 0x4002 or height < 6 or height % 6 != 0 or width > 0x4200 or width < 0x300 or width % 24 != 0 or rounded > 0x4200 or block != 0x300 or rounded % block != 0 or rounded < width or rounded - width >= block or blocks == 0 or blocks > 0x10 or blocks != rounded // block or lines == 0 or lines > 0xaab or lines != height // 6 or (bits != 12 and bits != 14 and bits != 16) or (kind != 16 and kind != 0):
+        error(corrupt, "Fujifilm compressed header is invalid")
+    var params = FujiParams(block_width = block, blocks = blocks, lines = lines, bits = bits, xtrans = kind == 16, lossless = lossless == 1)
+    errdefer params.close()
+    params.line_width = block * 2 // 3 if params.xtrans else block // 2
+    params.max_value = ((i32)1 << bits) - 1
+    let size = (usize)2 << (usize)bits
+    if not params.lossless:
+        # Three fixed tables for flat areas; the main one is set per line.
+        params.tables = try new i8[3 * size] in memory.heap
+        let bases: i32[3] = [0, 1, 2]
+        let grads: i32[3] = [5, 6, 7]
+        let firsts: i32[3] = [0x12, 0x15, 0x18]
+        let seconds: i32[3] = [0x43, 0x48, 0x4d]
+        let thirds: i32[3] = [0x114, 0x11b, 0x122]
+        for k: usize in 0..<3:
+            var quant = FujiQuant(table = params.tables[k * size..<(k + 1) * size], base = bases[k], max_grad = grads[k], grad_mult = 3)
+            quant.total_values = (params.max_value + 2 * bases[k]) // (2 * bases[k] + 1) + 1
+            quant.raw_bits = log2ceil(quant.total_values)
+            var q: i32[5] = [bases[k], 0, 0, 0, params.max_value]
+            q[1] = firsts[k] if q[4] >= firsts[k] else q[0] + 1
+            q[2] = seconds[k] if q[4] >= seconds[k] else q[1]
+            q[3] = thirds[k] if q[4] >= thirds[k] else q[2]
+            fuji_qlut(quant.table, q)
+            params.quant[k + 1] = quant
+    return params
+
+## The largest number of zero bits a sample can start with.
+inline func leading32(value: u32) -> i32:
+    var n: i32 = 0
+    var x = value
+    if (x & 0xffff0000) == 0:
+        n += 16
+        x <<= 16
+    if (x & 0xff000000) == 0:
+        n += 8
+        x <<= 8
+    if (x & 0xf0000000) == 0:
+        n += 4
+        x <<= 4
+    if (x & 0xc0000000) == 0:
+        n += 2
+        x <<= 2
+    if (x & 0x80000000) == 0:
+        n += 1
+    return n
+
+## Consume `n` bits; LibRaw tolerates reading one zero byte past the data.
+inline func fuji_consume(reader: Bits*, n: u32) -> !:
+    reader.buffer = reader.buffer << n if n < 64 else 0
+    reader.count -= n
+    if reader.count + 8 < reader.padding:
+        error(corrupt, "Fujifilm compressed data is truncated")
+
+## Count zero bits up to and including the next one bit.
+func fuji_zeros(reader: Bits*) -> i32!:
+    var zeros: i32 = 0
+    while true:
+        if reader.count < 33:
+            reader.fill()
+        let top = (u32)(reader.buffer >> 32)
+        if top != 0:
+            let n = leading32(top)
+            try fuji_consume(reader, (u32)n + 1)
+            return zeros + n
+        zeros += 32
+        try fuji_consume(reader, 32)
+        if zeros > 1024:
+            error(corrupt, "Fujifilm compressed data is invalid")
+    return zeros
+
+## The next `n` bits.
+func fuji_read(reader: Bits*, n: i32) -> i32!:
+    if n <= 0:
+        return 0
+    if n > 32:
+        error(corrupt, "Fujifilm compressed code is too long")
+    if reader.count < (u32)n:
+        reader.fill()
+    let value = (i32)(u32)(reader.buffer >> (64 - (u32)n))
+    try fuji_consume(reader, (u32)n)
+    return value

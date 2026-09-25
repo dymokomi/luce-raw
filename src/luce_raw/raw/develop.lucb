@@ -24,20 +24,25 @@ struct Job:
     var gain: f64
     var orientation: u64
     var across: usize
+    var hexagons: const Hexagons*?
 
 ## Demosaic one tile with its own scratch; `parallel` calls it.
 func develop_item(context: void*, index: usize) -> !:
     let job = (Job*)context
     var scratch = AhdScratch()
     defer scratch.close()
-    if job.quality == .best and job.plane.channels == 1:
+    var xscratch = XtransScratch()
+    defer xscratch.close()
+    if job.hexagons != none:
+        xscratch = try XtransScratch.create()
+    elif job.quality == .best and job.plane.channels == 1:
         scratch = try AhdScratch.create(tile_size)
     let rgb = try new u16[tile_size * tile_size * 3] in memory.heap
     defer free(rgb) in memory.heap
-    develop_tile(job, &scratch, rgb, index)
+    develop_tile(job, &scratch, &xscratch, rgb, index)
 
 ## Demosaic tile `index` and write it out.
-func develop_tile(job: Job*, scratch: AhdScratch*, rgb: u16[], index: usize):
+func develop_tile(job: Job*, scratch: AhdScratch*, xscratch: XtransScratch*, rgb: u16[], index: usize):
     let plane = job.plane
     let x0 = index % job.across * tile_size
     let y0 = index // job.across * tile_size
@@ -49,18 +54,27 @@ func develop_tile(job: Job*, scratch: AhdScratch*, rgb: u16[], index: usize):
         for y in 0..<h:
             let source = ((y0 + y) * plane.width + x0) * 3
             memory.copy(rgb[y * w * 3..], plane.data[source..], w * 3)
-    elif job.quality == .fast:
+    elif job.quality == .fast or (plane.xtrans and job.hexagons == none):
         bilinear_tile(plane, x0, y0, (usize)x1, (usize)y1, rgb, w, 0, 0)
     else:
-        # AHD inside the border, plain averages in it.
-        let border: usize = 5
+        # AHD (or Markesteijn) inside the border, plain averages in it.
+        let hexagons = job.hexagons
+        let border: usize = 8 if hexagons != none else 5
         let ix0 = math.imax((i64)x0, (i64)border)
         let iy0 = math.imax((i64)y0, (i64)border)
         let ix1 = math.imin(x1, (i64)plane.width - (i64)border)
         let iy1 = math.imin(y1, (i64)plane.height - (i64)border)
         let inner = ix0 < ix1 and iy0 < iy1
         if inner:
-            ahd_tile(plane, job.table, scratch, (usize)ix0, (usize)iy0, (usize)ix1, (usize)iy1, rgb, w, (usize)ix0 - x0, (usize)iy0 - y0)
+            if let rings = hexagons:
+                let m = (i64)xtrans_margin
+                let top = (usize)math.imax(3, iy0 - m)
+                let left = (usize)math.imax(3, ix0 - m)
+                let bottom = (usize)math.imin((i64)plane.height - 3, iy1 + m)
+                let right = (usize)math.imin((i64)plane.width - 3, ix1 + m)
+                xtrans_tile(plane, rings, job.table, xscratch, top, left, bottom, right, (usize)ix0, (usize)iy0, (usize)ix1, (usize)iy1, rgb, w, (usize)ix0 - x0, (usize)iy0 - y0)
+            else:
+                ahd_tile(plane, job.table, scratch, (usize)ix0, (usize)iy0, (usize)ix1, (usize)iy1, rgb, w, (usize)ix0 - x0, (usize)iy0 - y0)
         for y in y0..<(usize)y1:
             for x in x0..<(usize)x1:
                 if inner and (i64)x >= ix0 and (i64)x < ix1 and (i64)y >= iy0 and (i64)y < iy1:
@@ -108,5 +122,11 @@ func develop_plane(plane: const Plane*, look: const Development*, image: Raster*
     defer table.close()
     let across = (plane.width + tile_size - 1) // tile_size
     let down = (plane.height + tile_size - 1) // tile_size
+    var hexagons = Hexagons()
+    defer hexagons.close()
     var job = Job(plane = plane, table = &table, look = look, image = image, quality = quality, gain = gain, orientation = orientation, across = across)
+    # X-Trans at best quality: Markesteijn, on planes big enough for its tiles.
+    if plane.xtrans and plane.channels == 1 and quality == .best and plane.width >= 32 and plane.height >= 32:
+        hexagons = try hexagons_of(plane)
+        job.hexagons = &hexagons
     try parallel(across * down, threads, (void*)&job, develop_item)

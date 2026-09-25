@@ -1,0 +1,196 @@
+#==============================================================================================
+#
+#   raw/xtrans_steps - Red, blue and the choice of direction for X-Trans
+#
+#   DESCRIPTION:
+#       The later steps of LibRaw's xtrans_interpolate on one tile: red and blue
+#       for solitary greens (choosing between diagonal estimates by their
+#       smoothness), red for blue pixels and blue for red, red and blue for 2×2
+#       green blocks, and the final choice: CIELAB derivatives along each
+#       direction, homogeneity counts, and the mean of the best directions.
+#       `rgb` holds eight (or, during refinement, four) directions of RGB.
+#
+#==============================================================================================
+
+inline func tile_index(row: i64, col: i64, t: i64, l: i64) -> i64:
+    return ((row - t) * (i64)xtrans_side + col - l) * 3
+
+## Red and blue for the solitary green pixels, in four directions.
+func xtrans_solitary(plane: const Plane*, rings: const Hexagons*, rgb: u16[], t: i64, l: i64, mrow: i64, mcol: i64):
+    let ts = (i64)xtrans_side
+    let step = ts * ts * 3
+    let sg_row = (i64)rings.solitary_row
+    let sg_col = (i64)rings.solitary_col
+    var row = (t - sg_row + 4) // 3 * 3 + sg_row
+    while row < mrow - 2:
+        var col = (l - sg_col + 4) // 3 * 3 + sg_col
+        while col < mcol - 2:
+            var rix = tile_index(row, col, t, l)
+            var h = xcolor(plane, col + 1, row)
+            if h == 1:
+                break
+            var diff: f32[6]
+            var color: i64[24]
+            var i: i64 = 1
+            for d: i64 in 0..<6:
+                for c: i64 in 0..<2:
+                    let off = (i << c) * 3
+                    let g = 2 * (i64)rgb[(usize)(rix + 1)] - (i64)rgb[(usize)(rix + off + 1)] - (i64)rgb[(usize)(rix - off + 1)]
+                    color[(usize)(h * 8 + d)] = g + (i64)rgb[(usize)(rix + off + h)] + (i64)rgb[(usize)(rix - off + h)]
+                    if d > 1:
+                        let e = (f32)rgb[(usize)(rix + off + 1)] - (f32)rgb[(usize)(rix - off + 1)] - (f32)rgb[(usize)(rix + off + h)] + (f32)rgb[(usize)(rix - off + h)]
+                        diff[(usize)d] += e * e + (f32)g * (f32)g
+                    h ^= 2
+                if d > 1 and (d & 1) == 1 and diff[(usize)d - 1] < diff[(usize)d]:
+                    color[(usize)d] = color[(usize)d - 1]
+                    color[(usize)(16 + d)] = color[(usize)(16 + d - 1)]
+                if d < 2 or (d & 1) == 1:
+                    rgb[(usize)rix] = clamp16(color[(usize)d] // 2)
+                    rgb[(usize)(rix + 2)] = clamp16(color[(usize)(16 + d)] // 2)
+                    rix += step
+                i ^= ts ^ 1
+                h ^= 2
+            col += 3
+        row += 3
+
+## Red for blue pixels and blue for red ones.
+func xtrans_opposite(plane: const Plane*, rings: const Hexagons*, rgb: u16[], t: i64, l: i64, mrow: i64, mcol: i64):
+    let ts = (i64)xtrans_side
+    let step = ts * ts * 3
+    for row in t + 3..<mrow - 3:
+        for col in l + 3..<mcol - 3:
+            let f = 2 - xcolor(plane, col, row)
+            if f == 1:
+                continue
+            var rix = tile_index(row, col, t, l)
+            let c = ts if (row - (i64)rings.solitary_row) % 3 != 0 else 1
+            let h = 3 * (c ^ ts ^ 1)
+            for d: i64 in 0..<4:
+                let g0 = (i64)rgb[(usize)(rix + 1)]
+                let across = absolute((i32)(g0 - (i64)rgb[(usize)(rix + c * 3 + 1)])) + absolute((i32)(g0 - (i64)rgb[(usize)(rix - c * 3 + 1)]))
+                let along = absolute((i32)(g0 - (i64)rgb[(usize)(rix + h * 3 + 1)])) + absolute((i32)(g0 - (i64)rgb[(usize)(rix - h * 3 + 1)]))
+                let i = c if d > 1 or ((d ^ c) & 1) != 0 or across < 2 * along else h
+                let value = (i64)rgb[(usize)(rix + i * 3 + f)] + (i64)rgb[(usize)(rix - i * 3 + f)] + 2 * g0 - (i64)rgb[(usize)(rix + i * 3 + 1)] - (i64)rgb[(usize)(rix - i * 3 + 1)]
+                rgb[(usize)(rix + f)] = clamp16(value // 2)
+                rix += step
+
+let red_blue: i64[2] = [0, 2]
+
+## Red and blue for 2×2 blocks of green.
+func xtrans_blocks(plane: const Plane*, rings: const Hexagons*, rgb: u16[], t: i64, l: i64, mrow: i64, mcol: i64):
+    let step = (i64)(xtrans_side * xtrans_side * 3)
+    for row in t + 2..<mrow - 2:
+        if (row - (i64)rings.solitary_row) % 3 == 0:
+            continue
+        for col in l + 2..<mcol - 2:
+            if (col - (i64)rings.solitary_col) % 3 == 0:
+                continue
+            var rix = tile_index(row, col, t, l)
+            let base = (usize)((row % 3) * 3 + col % 3) * 8
+            var d: usize = 0
+            while d < 8:
+                let a = rix + rings.tile[base + d] * 3
+                let b = rix + rings.tile[base + d + 1] * 3
+                let paired = rings.tile[base + d] + rings.tile[base + d + 1] != 0
+                let g = 3 * (i64)rgb[(usize)(rix + 1)] - 2 * (i64)rgb[(usize)(a + 1)] - (i64)rgb[(usize)(b + 1)] if paired else 2 * (i64)rgb[(usize)(rix + 1)] - (i64)rgb[(usize)(a + 1)] - (i64)rgb[(usize)(b + 1)]
+                for c in red_blue:
+                    if paired:
+                        rgb[(usize)(rix + c)] = clamp16((g + 2 * (i64)rgb[(usize)(a + c)] + (i64)rgb[(usize)(b + c)]) // 3)
+                    else:
+                        rgb[(usize)(rix + c)] = clamp16((g + (i64)rgb[(usize)(a + c)] + (i64)rgb[(usize)(b + c)]) // 2)
+                d += 2
+                rix += step
+
+## Differentiate each direction in CIELAB, count homogeneous neighbours, and
+## write the mean of the most homogeneous directions for [x0, x1) × [y0, y1).
+## Each stage covers only the rows and columns the next reads, within the
+## ranges LibRaw computes; what lies outside stays zero, as in LibRaw.
+func xtrans_choose(plane: const Plane*, rings: const Hexagons*, table: const LabTable*, scratch: XtransScratch*, t: i64, l: i64, mr: i64, mc: i64, x0: usize, y0: usize, x1: usize, y1: usize, out: u16[], stride: usize, ox: usize, oy: usize):
+    let ts = (i64)xtrans_side
+    let area = xtrans_side * xtrans_side
+    let rgb = scratch.rgb
+    let lab = scratch.lab
+    let steps: i64[4] = [1, ts, ts + 1, ts - 1]
+    let m = table.to_xyz
+    let r0 = (i64)y0 - t
+    let r1 = (i64)y1 - t
+    let c0 = (i64)x0 - l
+    let c1 = (i64)x1 - l
+    for d: usize in 0..<xtrans_directions:
+        for row in math.imax(2, r0 - 4)..<math.imin(mr - 2, r1 + 4):
+            for col in math.imax(2, c0 - 4)..<math.imin(mc - 2, c1 + 4):
+                let o = (usize)(row * ts + col) * 3
+                let src = d * area * 3 + o
+                let r = (i64)rgb[src]
+                let g = (i64)rgb[src + 1]
+                let b = (i64)rgb[src + 2]
+                let fx = clip16((m[0] * r + m[1] * g + m[2] * b + 32768) >> 16)
+                let fy = clip16((m[3] * r + m[4] * g + m[5] * b + 32768) >> 16)
+                let fz = clip16((m[6] * r + m[7] * g + m[8] * b + 32768) >> 16)
+                lab[o] = table.lightness[fy]
+                lab[o + 1] = table.red_green[fx] - table.red_green[fy]
+                lab[o + 2] = table.blue_yellow[fy] - table.blue_yellow[fz]
+        let f = steps[d & 3] * 3
+        for row in math.imax(3, r0 - 3)..<math.imin(mr - 3, r1 + 3):
+            for col in math.imax(3, c0 - 3)..<math.imin(mc - 3, c1 + 3):
+                let o = (row * ts + col) * 3
+                let g = 2 * (i64)lab[(usize)o] - (i64)lab[(usize)(o + f)] - (i64)lab[(usize)(o - f)]
+                let a = 2 * (i64)lab[(usize)(o + 1)] - (i64)lab[(usize)(o + f + 1)] - (i64)lab[(usize)(o - f + 1)] + g * 500 // 232
+                let b = 2 * (i64)lab[(usize)(o + 2)] - (i64)lab[(usize)(o + f + 2)] - (i64)lab[(usize)(o - f + 2)] - g * 500 // 580
+                scratch.derivative[d * area + (usize)(row * ts + col)] = (f32)(g * g + a * a + b * b)
+    let homo = scratch.homogeneity
+    memory.set(homo, 0)
+    for row in math.imax(4, r0 - 2)..<math.imin(mr - 4, r1 + 2):
+        for col in math.imax(4, c0 - 2)..<math.imin(mc - 4, c1 + 2):
+            let at = (usize)(row * ts + col)
+            var threshold = scratch.derivative[at]
+            for d: usize in 1..<xtrans_directions:
+                if threshold > scratch.derivative[d * area + at]:
+                    threshold = scratch.derivative[d * area + at]
+            threshold *= 8.0f32
+            for d: usize in 0..<xtrans_directions:
+                let base = d * area + at
+                var count: u8 = 0
+                for v: i64 in -1..=1:
+                    let line = (usize)((i64)base + v * ts)
+                    if scratch.derivative[line - 1] <= threshold: count += 1
+                    if scratch.derivative[line] <= threshold: count += 1
+                    if scratch.derivative[line + 1] <= threshold: count += 1
+                homo[base] = count
+    # Five-wide horizontal sums, then five-tall sums of those per pixel.
+    let sums = scratch.sums
+    for d: usize in 0..<xtrans_directions:
+        for row in r0 - 2..<r1 + 2:
+            for col in c0..<c1:
+                let at = d * area + (usize)(row * ts + col)
+                sums[at] = (u16)homo[at - 2] + (u16)homo[at - 1] + (u16)homo[at] + (u16)homo[at + 1] + (u16)homo[at + 2]
+    for y in y0..<y1:
+        let row = (i64)y - t
+        for x in x0..<x1:
+            let col = (i64)x - l
+            let at = (usize)(row * ts + col)
+            var hm: i64[8]
+            for d: usize in 0..<xtrans_directions:
+                let o = d * area + at
+                let s2 = xtrans_side * 2
+                hm[d] = (i64)sums[o - s2] + (i64)sums[o - xtrans_side] + (i64)sums[o] + (i64)sums[o + xtrans_side] + (i64)sums[o + s2]
+            for d: usize in 0..<xtrans_directions - 4:
+                if hm[d] < hm[d + 4]:
+                    hm[d] = 0
+                elif hm[d] > hm[d + 4]:
+                    hm[d + 4] = 0
+            var best = hm[0]
+            for d: usize in 1..<xtrans_directions:
+                if best < hm[d]:
+                    best = hm[d]
+            best -= best >> 3
+            var totals: i64[4]
+            let o = at * 3
+            for d: usize in 0..<xtrans_directions:
+                if hm[d] >= best:
+                    for c: usize in 0..<3:
+                        totals[c] += (i64)rgb[d * area * 3 + o + c]
+                    totals[3] += 1
+            let target = ((oy + y - y0) * stride + ox + x - x0) * 3
+            for c: usize in 0..<3:
+                out[target + c] = (u16)(totals[c] // totals[3])

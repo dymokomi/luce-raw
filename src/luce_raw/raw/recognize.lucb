@@ -1,0 +1,71 @@
+#==============================================================================================
+#
+#   raw/recognize - Telling camera raws from other files
+#
+#   DESCRIPTION:
+#       `recognize` answers whether a file is a camera raw at all, by signature or
+#       by structure: a DNG, a maker's own container (RAF, CR3, CRW, X3F, MRW), a
+#       TIFF variant only raws use (ORF, RW2, CR2), or a TIFF from a camera maker
+#       that holds color-filter data or a raw-only compression. An editor asks it
+#       after `detect` fails, to report the raw's own error instead of treating
+#       the file as a plain TIFF. `foreign_raw` names the raws this package knows
+#       but cannot develop, so `probe` and `decode` say so plainly.
+#
+#==============================================================================================
+
+## Makers whose TIFF-structured files are raws when they carry sensor data.
+let raw_makers: str[16] = ["Canon", "NIKON", "SONY", "OLYMPUS", "OM Digital", "Panasonic", "LEICA", "PENTAX", "RICOH", "FUJIFILM",
+                           "SAMSUNG", "KODAK", "Hasselblad", "Phase One", "SIGMA", "Minolta"]
+
+## The message for a raw format this package recognizes but cannot develop,
+## or empty.
+func foreign_raw(file: const u8[]) -> str:
+    if file.length >= 12 and (str)file[4..<8] == "ftyp" and (str)file[8..<12] == "crx ":
+        return "Canon CR3 raws are not supported yet"
+    if file.length >= 14 and (str)file[6..<14] == "HEAPCCDR":
+        return "Canon CRW raws are not supported"
+    if file.length >= 4 and (str)file[..<4] == "FOVb":
+        return "Sigma X3F raws are not supported"
+    if file.length >= 4 and file[0] == 0 and (str)file[1..<4] == "MRM":
+        return "Minolta MRW raws are not supported"
+    return ""
+
+## Whether `data` is a camera raw, whether or not this package can develop
+## it: false for plain TIFFs and other images. Where `detect` is false and
+## this is true, `probe` fails with a message naming what is not supported.
+pub func recognize(data: const u8[]) -> bool:
+    if data.length < 16:
+        return false
+    if foreign_raw(data).length > 0 or (str)data[..<8] == "FUJIFILM":
+        return true
+    if not ((data[0] == 'I' and data[1] == 'I') or (data[0] == 'M' and data[1] == 'M')):
+        return false
+    let magic = (u64)data[2] | ((u64)data[3] << 8) if data[0] == 'I' else ((u64)data[2] << 8) | (u64)data[3]
+    if magic == 0x4f52 or magic == 0x5352 or magic == 0x55:
+        return true
+    if magic == 42 and data[8] == 'C' and data[9] == 'R':
+        return true
+    let tree = Tree.walk(data, 0, 0) catch failure:
+        return false
+    return raw_structure(&tree) catch failure:
+        recover false
+
+## Whether a TIFF's directories hold a DNG, or a camera maker's sensor data.
+func raw_structure(tree: const Tree*) -> bool!:
+    if try tree.holding(50706) != none:
+        return true
+    let holder = try tree.holding(271) else return false
+    let make = try holder.text(271)
+    var known = false
+    for maker in raw_makers:
+        if starts(make, maker):
+            known = true
+    if not known:
+        return false
+    for i in 0..<tree.count:
+        let directory = try tree.at(i)
+        let photometric = try directory.uint(262)
+        let compression = try directory.uint(259, 1)
+        if photometric == 32803 or photometric == 34892 or compression == 34713 or compression == 32767 or compression == 65535 or compression == 32769 or compression == 32770:
+            return true
+    return false

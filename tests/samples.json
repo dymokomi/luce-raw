@@ -112,5 +112,53 @@
   "url": "https://raw.pixls.us/getfile.php/7833/nice/Sony%20-%20ILCE-1M2%20-%2014bit%20lossless%20(3:2).ARW",
   "sha256": "3f4ce83f58b1809b9f0d70489091b44e9597a57ec80470bade3fcf53640c6469",
   "camera": "Sony ILCE-1M2"
+ },
+ {
+  "name": "fuji_xt2_xtrans_14u.raf",
+  "url": "https://raw.pixls.us/getfile.php/864/nice/Fujifilm%20-%20X-T2%20-%2014bit%2014bit%20uncompressed%20(3:2).RAF",
+  "sha256": "aaa648429eeee8e1bea05fccfeeb2ea54ee7052e23db0ee02f049e5b23cecaef",
+  "camera": "Fujifilm X-T2"
+ },
+ {
+  "name": "fuji_xt2_xtrans_14c.raf",
+  "url": "https://raw.pixls.us/getfile.php/865/nice/Fujifilm%20-%20X-T2%20-%2014bit%2014bit%20compressed%20(3:2).RAF",
+  "sha256": "f756ad5be551a8b3e1b503a8a6f7e8e637fba519c0b0f8c79dd58e94b0287602",
+  "camera": "Fujifilm X-T2"
+ },
+ {
+  "name": "fuji_gfx50s_14c.raf",
+  "url": "https://raw.pixls.us/getfile.php/1435/nice/Fujifilm%20-%20GFX%2050S%20-%2014bit%2014bit%20compressed%20(3:2).RAF",
+  "sha256": "a7124d13910e0241a6b035154bc1fcdb7be4439371d043b1e1950a0251feb51e",
+  "camera": "Fujifilm GFX 50S"
+ },
+ {
+  "name": "pentax_k1.pef",
+  "url": "https://raw.pixls.us/getfile.php/2469/nice/Pentax%20-%20K-1%20-%2014bit%20(3:2).PEF",
+  "sha256": "068c902e7b38ac31c7c6eca5c55f69ca395ec6aa7170489281b692a893d0fee9",
+  "camera": "Pentax K-1"
+ },
+ {
+  "name": "fuji_xe1_xtrans_12u.raf",
+  "url": "https://raw.pixls.us/getfile.php/3098/nice/Fujifilm%20-%20X-E1%20-%2012bit%2012bit%20uncompressed%20(3:2).RAF",
+  "sha256": "0fa01fa1a674bcfa40f659225b4e66c5bedf15d2f78407ca1966dc8f38cd0e9f",
+  "camera": "Fujifilm X-E1"
+ },
+ {
+  "name": "fuji_xe5_lossy.raf",
+  "url": "https://raw.pixls.us/getfile.php/8509/nice/Fujifilm%20-%20X-E5%20-%2014bit%20lossy%20compressed%20(3:2).RAF",
+  "sha256": "28f56cc9784164209e92fae209bdcc78267bd692aa2fb964595485f7e93692ab",
+  "camera": "Fujifilm X-E5"
+ },
+ {
+  "name": "nikon_d750_12lossy.nef",
+  "url": "https://raw.pixls.us/data/Nikon/D750/compressed_12_bit.NEF",
+  "sha256": "e4a3f85e014275fc0a47600a373af95ec850872a5f6cf87649bcaa42b77ef2e4",
+  "camera": "Nikon D750"
+ },
+ {
+  "name": "olympus_em1m2.orf",
+  "url": "https://raw.pixls.us/data/Olympus/E-M1MarkII/Olympus_EM1mk2_Standard_20MP.ORF",
+  "sha256": "4bc52d99e4fbf2f09335a3301a4634bc261a98441edb824434ec069f7026cd71",
+  "camera": "Olympus E-M1 Mark II"
  }
 ]

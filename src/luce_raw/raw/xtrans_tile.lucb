@@ -1,0 +1,139 @@
+#==============================================================================================
+#
+#   raw/xtrans_tile - One tile of the X-Trans demosaic
+#
+#   DESCRIPTION:
+#       The steps of LibRaw's xtrans_interpolate for one region of the plane, in
+#       its integer arithmetic: green in four directions, two refinement passes on
+#       a copy (directions four to seven), red and blue for solitary greens, for
+#       each other, and for 2×2 green blocks, then CIELAB derivatives, homogeneity
+#       and the average of the best directions. Region coordinates are absolute;
+#       buffers are `xtrans_side` square.
+#
+#==============================================================================================
+
+## Buffers for one tile: eight directions of RGB, their derivatives and
+## homogeneity, and one direction's CIELAB.
+struct XtransScratch:
+    var rgb: u16[]
+    var lab: i32[]
+    var derivative: f32[]
+    var homogeneity: u8[]
+    var sums: u16[]
+
+    static func create() -> XtransScratch!:
+        let area = xtrans_side * xtrans_side
+        var scratch = XtransScratch()
+        errdefer scratch.close()
+        scratch.rgb = try new u16[xtrans_directions * area * 3] in memory.heap
+        scratch.lab = try new i32[area * 3] in memory.heap
+        scratch.derivative = try new f32[xtrans_directions * area] in memory.heap
+        scratch.homogeneity = try new u8[xtrans_directions * area] in memory.heap
+        scratch.sums = try new u16[xtrans_directions * area] in memory.heap
+        return scratch
+
+    mutating func close():
+        if self.rgb.length > 0:
+            free(self.rgb) in memory.heap
+        if self.lab.length > 0:
+            free(self.lab) in memory.heap
+        if self.derivative.length > 0:
+            free(self.derivative) in memory.heap
+        if self.homogeneity.length > 0:
+            free(self.homogeneity) in memory.heap
+        if self.sums.length > 0:
+            free(self.sums) in memory.heap
+        self = XtransScratch()
+
+inline func clamp16(value: i64) -> u16:
+    return 0 if value < 0 else 65535 if value > 65535 else (u16)value
+
+## LibRaw's LIM: `value` no higher than `high`, then no lower than `low`.
+inline func bounded(value: i64, low: u16, high: u16) -> u16:
+    let capped = value if value < (i64)high else (i64)high
+    return (u16)(capped if capped > (i64)low else (i64)low)
+
+## The plane's channel `c` at index `i` as LibRaw's image holds it: the
+## pixel's own color, green's lower limit on red and blue pixels, else zero.
+inline func channel(plane: const Plane*, rings: const Hexagons*, i: i64, c: i64) -> i64:
+    let x = i % (i64)plane.width
+    let y = i // (i64)plane.width
+    let own = xcolor(plane, x, y)
+    if own == c:
+        return (i64)plane.data[(usize)i]
+    return (i64)rings.low[(usize)i] if c == 1 else 0
+
+## Demosaic the region [top, bottom) × [left, right) and write the rectangle
+## [x0, x1) × [y0, y1) of it to `out` (RGB rows of `stride` pixels from
+## (`ox`, `oy`)).
+func xtrans_tile(plane: const Plane*, rings: const Hexagons*, table: const LabTable*, scratch: XtransScratch*, top: usize, left: usize, bottom: usize, right: usize, x0: usize, y0: usize, x1: usize, y1: usize, out: u16[], stride: usize, ox: usize, oy: usize):
+    let ts = (i64)xtrans_side
+    let area = xtrans_side * xtrans_side
+    let rgb = scratch.rgb
+    let w = (i64)plane.width
+    let sg_row = (i64)rings.solitary_row
+    let sg_col = (i64)rings.solitary_col
+    let t = (i64)top
+    let l = (i64)left
+    let mrow = (i64)bottom
+    let mcol = (i64)right
+    # Direction 0 holds the pixel as LibRaw's image does; 1 to 3 copy it.
+    for row in t..<mrow:
+        for col in l..<mcol:
+            let i = row * w + col
+            let o = ((row - t) * ts + col - l) * 3
+            for c: i64 in 0..<3:
+                rgb[(usize)o + (usize)c] = (u16)channel(plane, rings, i, c)
+    for d: usize in 1..<4:
+        memory.copy(rgb[d * area * 3..], rgb[..<area * 3], area * 3)
+    # Green horizontally, vertically and along both diagonals.
+    for row in t..<mrow:
+        for col in l..<mcol:
+            let f = xcolor(plane, col, row)
+            if f == 1:
+                continue
+            let i = row * w + col
+            let base = (usize)((row % 3) * 3 + col % 3) * 8
+            let hx = rings.plane[base..<base + 8]
+            var color: i64[4]
+            color[0] = 174 * (channel(plane, rings, i + hx[1], 1) + channel(plane, rings, i + hx[0], 1)) - 46 * (channel(plane, rings, i + 2 * hx[1], 1) + channel(plane, rings, i + 2 * hx[0], 1))
+            color[1] = 223 * channel(plane, rings, i + hx[3], 1) + channel(plane, rings, i + hx[2], 1) * 33 + 92 * (channel(plane, rings, i, f) - channel(plane, rings, i - hx[2], f))
+            for c: usize in 0..<2:
+                color[2 + c] = 164 * channel(plane, rings, i + hx[4 + c], 1) + 92 * channel(plane, rings, i - 2 * hx[4 + c], 1) + 33 * (2 * channel(plane, rings, i, f) - channel(plane, rings, i + 3 * hx[4 + c], f) - channel(plane, rings, i - 3 * hx[4 + c], f))
+            let flip: usize = 1 if (row - sg_row) % 3 == 0 else 0
+            let o = (usize)((row - t) * ts + col - l) * 3 + 1
+            for c: usize in 0..<4:
+                rgb[(c ^ flip) * area * 3 + o] = bounded(color[c] >> 8, rings.low[(usize)i], rings.high[(usize)i])
+    for pass: usize in 0..<3:
+        # From the second pass on, directions 4 to 7 are refined copies.
+        let shift = 0 if pass == 0 else 4 * area * 3
+        if pass == 1:
+            memory.copy(rgb[shift..], rgb[..<shift], shift)
+        let work = rgb[shift..]
+        if pass > 0:
+            xtrans_refine_green(plane, rings, work, t, l, mrow, mcol)
+        xtrans_solitary(plane, rings, work, t, l, mrow, mcol)
+        xtrans_opposite(plane, rings, work, t, l, mrow, mcol)
+        xtrans_blocks(plane, rings, work, t, l, mrow, mcol)
+    xtrans_choose(plane, rings, table, scratch, t, l, mrow - t, mcol - l, x0, y0, x1, y1, out, stride, ox, oy)
+
+## Recalculate green from the interpolated values of closer pixels.
+func xtrans_refine_green(plane: const Plane*, rings: const Hexagons*, rgb: u16[], t: i64, l: i64, mrow: i64, mcol: i64):
+    let ts = (i64)xtrans_side
+    let area = (i64)(xtrans_side * xtrans_side)
+    let w = (i64)plane.width
+    for row in t + 2..<mrow - 2:
+        for col in l + 2..<mcol - 2:
+            let f = xcolor(plane, col, row)
+            if f == 1:
+                continue
+            let base = (usize)((row % 3) * 3 + col % 3) * 8
+            let flip: i64 = 1 if (row - (i64)rings.solitary_row) % 3 == 0 else 0
+            let i = (usize)(row * w + col)
+            for d: i64 in 3..<6:
+                let hd = rings.tile[base + (usize)d]
+                let rix = (((d - 2) ^ flip) * area + (row - t) * ts + col - l) * 3
+                let a = rix - 2 * hd * 3
+                let b = rix + hd * 3
+                let value = (i64)rgb[(usize)(a + 1)] + 2 * (i64)rgb[(usize)(b + 1)] - (i64)rgb[(usize)(a + f)] - 2 * (i64)rgb[(usize)(b + f)] + 3 * (i64)rgb[(usize)(rix + f)]
+                rgb[(usize)(rix + 1)] = bounded(value // 3, rings.low[i], rings.high[i])

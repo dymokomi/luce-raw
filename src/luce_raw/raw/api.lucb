@@ -3,15 +3,17 @@
 #   raw/api - detect, probe, decode, info, white balance and sensor
 #
 #   DESCRIPTION:
-#       The public surface. parse recognises the format and fills a Meta; probe
+#       The public surface (recognize.lucb adds `recognize`). parse identifies the
+#       format and fills a Meta; probe
 #       sizes a Raster from it without reading samples; decode unpacks, levels,
 #       demosaics and writes linear sRGB. info and white_balance answer questions
 #       about the camera's white balance for an editor's open dialog.
 #
 #==============================================================================================
 
-## Whether `data` starts like a raw this package reads: a DNG or a maker raw
-## (CR2, NEF, ARW, ORF, RW2, PEF, RAF). Plain TIFFs answer false.
+## Whether this package can develop `data`: a DNG or a maker raw (CR2, NEF,
+## ARW, ORF, RW2, PEF, RAF) in a coding it reads. Plain TIFFs answer false; for
+## raws it cannot develop, `recognize` answers true and `probe` says why.
 pub func detect(data: const u8[]) -> bool:
     var meta = parse(data) catch failure:
         return false
@@ -24,6 +26,9 @@ func parse(file: const u8[]) -> Meta!:
     errdefer meta.close()
     if file.length < 16:
         error(corrupt, "raw file is truncated")
+    let foreign = foreign_raw(file)
+    if foreign.length > 0:
+        error(unsupported, foreign)
     if (str)file[..<8] == "FUJIFILM":
         try parse_raf(file, &meta)
     else:
@@ -53,6 +58,10 @@ func parse(file: const u8[]) -> Meta!:
         lookup_matrix(&meta, true)
     elif meta.profile.matrices == 0:
         lookup_matrix(&meta, false)
+    if meta.quarter_black:
+        for i in 0..<meta.black.length:
+            meta.black[i] = math.floor(meta.black[i] / 4.0)
+        meta.white = [4095.0, 4095.0, 4095.0]
     try meta.settle()
     return meta
 
@@ -145,7 +154,8 @@ pub func decode(image: Raster*, options: Options = Options()) -> !:
 ## A raw's sensor samples after the file's linearization, with the facts that
 ## normalize them: for inspecting a raw or checking a decoder against another.
 ## `cfa` and `black` are the 2×2 colors (0 red, 1 green, 2 blue) and black
-## levels at the active area's top-left; `samples` is owned, release it with
+## levels at the active area's top-left; `pattern` is the 6×6 filter from that
+## corner (`xtrans` when it is Fujifilm's X-Trans rather than a tiled 2×2); `samples` is owned, release it with
 ## `close`.
 pub struct Sensor:
     pub var samples: u16[]
@@ -157,6 +167,8 @@ pub struct Sensor:
     pub var active_width: usize
     pub var active_height: usize
     pub var cfa: u8[4]
+    pub var pattern: u8[36]
+    pub var xtrans: bool
     pub var black: f64[4]
     pub var white: f64
 
@@ -172,7 +184,7 @@ pub func sensor(data: const u8[]) -> Sensor!:
     defer meta.close()
     var mosaic = try unpack(data, &meta, (usize)os.cpus())
     meta.measure_black(&mosaic)
-    var result = Sensor(samples = mosaic.data, width = mosaic.width, height = mosaic.height, channels = mosaic.samples, top = meta.top, left = meta.left, active_width = meta.width, active_height = meta.height, cfa = meta.cfa, white = meta.white[0])
+    var result = Sensor(samples = mosaic.data, width = mosaic.width, height = mosaic.height, channels = mosaic.samples, top = meta.top, left = meta.left, active_width = meta.width, active_height = meta.height, cfa = meta.cfa, pattern = meta.pattern, xtrans = meta.xtrans, white = meta.white[0])
     for i: usize in 0..<4:
         let at = ((i // 2) % meta.black_rows * meta.black_columns + (i % 2) % meta.black_columns) * meta.samples
         result.black[i] = meta.black[at]

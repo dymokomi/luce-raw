@@ -17,15 +17,24 @@
 #       canon.lucb     Canon CR2
 #       nikon.lucb     Nikon NEF and its lossless Huffman coding
 #       sony.lucb      Sony ARW, ARW2 blocks and the SR2 white balance
-#       others.lucb    Olympus ORF, Panasonic RW2, Pentax PEF and Fujifilm RAF
+#       olympus.lucb, panasonic.lucb, pentax.lucb, fujifilm.lucb
+#                      Olympus ORF, Panasonic RW2, Pentax PEF and Fujifilm RAF
+#       fuji_compressed.lucb, fuji_strips.lucb
+#                      Fujifilm's compressed RAF coding
+#       parallel.lucb  independent work items on several threads
 #       unpack.lucb    sensor samples out of the file into a 16-bit mosaic
-#       matrices.lucb  the table of camera color matrices for proprietary raws
-#       color.lucb     matrices, the DNG color model and temperature/tint
+#       matrices.lucb, matrices_*.lucb
+#                      the table of camera color matrices for proprietary raws
+#       color.lucb     matrices, xy and temperature/tint
+#       profile.lucb   the DNG color model and the Development for a white balance
 #       levels.lucb    black and white levels, white balance and clipping to [0, 1]
 #       bilinear.lucb  the fast demosaic
 #       ahd.lucb       adaptive homogeneity-directed demosaic
+#       xtrans.lucb, xtrans_tile.lucb, xtrans_steps.lucb
+#                      Markesteijn's X-Trans demosaic
 #       develop.lucb   tiles through demosaic, matrix and orientation into the Raster
 #       api.lucb       detect, probe, decode, info, white balance and sensor
+#       recognize.lucb which files are camera raws at all
 #       tests_codec.lucb  bit reader, Huffman and lossless JPEG tests
 #       tests_dng.lucb    synthetic DNG decoding, white balance and fuzzing tests
 #
@@ -33,7 +42,7 @@
 
 ## Camera RAW decoding: DNG (uncompressed, lossless JPEG, Deflate; Bayer and
 ## LinearRaw), Canon CR2, Nikon NEF, Sony ARW, Olympus ORF, Panasonic RW2,
-## Pentax PEF and Fujifilm RAF (Bayer). `probe` and `decode` fill a luce-raster
+## Pentax PEF and Fujifilm RAF (Bayer and X-Trans, uncompressed and compressed). `probe` and `decode` fill a luce-raster
 ## `Raster` with three float channels, R, G and B, in linear sRGB where the
 ## sensor's white level after white balance is 1.0 (times the file's baseline
 ## exposure). `info` and `white_balance` answer the as-shot white balance and
