@@ -160,13 +160,20 @@ func canon_color_data(maker: const Directory*, meta: Meta*, red_top: usize, red_
                 meta.neutral = [g / r, 1.0, g / b]
                 meta.neutral_known = true
 
-## The CR2's lossless JPEG, its lines laid into slices or straight rows.
-func unpack_canon(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
-    var jpeg = try LosslessJpeg.open(try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size))
+## The CR2's lossless JPEG, its lines laid into slices or straight rows; the
+## scan is decoded on `threads` where it resynchronises (serial.lucb).
+func unpack_canon(file: const u8[], meta: const Meta*, mosaic: Mosaic*, threads: usize) -> !:
+    let data = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size)
+    var jpeg = try LosslessJpeg.open(data)
     defer jpeg.close()
+    let decoded = try decode_jpeg_parallel(&jpeg, data, threads)
+    defer release_samples(decoded)
+    let whole = decoded.length > 0
+    let length = jpeg.width * jpeg.components
+    var taken: usize = 1
     let w = mosaic.width
     let h = mosaic.height
-    var line: const u16[] = try jpeg.next()
+    var line: const u16[] = decoded[..<length] if whole else try jpeg.next()
     var used: usize = 0
     let count = meta.slices[0] + 1 if meta.slices[0] > 0 else 1
     for slice in 0..<count:
@@ -176,9 +183,20 @@ func unpack_canon(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
             var x: usize = 0
             while x < span:
                 if used == line.length:
-                    line = try jpeg.next()
+                    if whole:
+                        if (taken + 1) * length > decoded.length:
+                            error(corrupt, "lossless JPEG read past its last line")
+                        line = decoded[taken * length..<(taken + 1) * length]
+                        taken += 1
+                    else:
+                        line = try jpeg.next()
                     used = 0
                 let take = math.imin((i64)(span - x), (i64)(line.length - used))
                 memory.copy(mosaic.data[y * w + x0 + x..], line[used..], (usize)take)
                 used += (usize)take
                 x += (usize)take
+
+## Free samples `decode_jpeg_parallel` returned, if any.
+func release_samples(samples: u16[]):
+    if samples.length > 0:
+        free(samples) in memory.heap

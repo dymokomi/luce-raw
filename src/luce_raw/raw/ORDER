@@ -20,6 +20,7 @@ fujifilm.lucb
 fuji_compressed.lucb
 fuji_strips.lucb
 parallel.lucb
+serial.lucb
 unpack.lucb
 matrices.lucb
 matrices_canon.lucb

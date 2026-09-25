@@ -20,11 +20,18 @@ let xtrans_side: usize = 288
 let xtrans_margin: usize = 16
 let xtrans_directions: usize = 8
 
-## The hexagon offsets of each 3×3 phase (in plane and in tile coordinates),
-## the phase of the solitary greens, and each pixel's green range.
+## The source buffer's margin beyond the tile: the green step reads three
+## hexagon steps (six pixels) away.
+let source_margin: usize = 6
+let source_side: usize = xtrans_side + 2 * source_margin
+
+## The hexagon offsets of each 3×3 phase (in plane, tile and source
+## coordinates), the phase of the solitary greens, and each pixel's green
+## range.
 struct Hexagons:
     var plane: i64[72]
     var tile: i64[72]
+    var source: i64[72]
     var solitary_row: usize
     var solitary_col: usize
     var low: u16[]
@@ -51,6 +58,7 @@ func hexagons_of(plane: const Plane*) -> Hexagons!:
     for i: usize in 0..<72:
         rings.plane[i] = 32700
         rings.tile[i] = 32700
+        rings.source[i] = 32700
     let w = (i64)plane.width
     for row: i64 in 0..<3:
         for col: i64 in 0..<3:
@@ -72,6 +80,7 @@ func hexagons_of(plane: const Plane*) -> Hexagons!:
                         let slot = (usize)(row * 3 + col) * 8 + (c ^ ((usize)(g * 2) & d))
                         rings.plane[slot] = h + v * w
                         rings.tile[slot] = h + v * (i64)xtrans_side
+                        rings.source[slot] = h + v * (i64)source_side
                 d += 2
     for i: usize in 0..<72:
         if rings.plane[i] == 32700:

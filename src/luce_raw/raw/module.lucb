@@ -25,6 +25,7 @@
 #       fuji_compressed.lucb, fuji_strips.lucb
 #                      Fujifilm's compressed RAF coding
 #       parallel.lucb  independent work items on several threads
+#       serial.lucb    serial Huffman streams decoded on several threads
 #       unpack.lucb    sensor samples out of the file into a 16-bit mosaic
 #       matrices.lucb, matrices_*.lucb
 #                      the table of camera color matrices for proprietary raws

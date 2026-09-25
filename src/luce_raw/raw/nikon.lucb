@@ -125,7 +125,7 @@ func canonical_black(meta: Meta*, levels: const Entry*) -> !:
         meta.black[p] = try levels.real(index)
 
 ## Nikon's Huffman-coded NEF.
-func unpack_nikon(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
+func unpack_nikon(file: const u8[], meta: const Meta*, mosaic: Mosaic*, threads: usize) -> !:
     var header = Reader(data = meta.extra, little = (meta.flags & 1) != 0)
     let version0 = try header.byte()
     let version1 = try header.byte()
@@ -160,8 +160,14 @@ func unpack_nikon(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
             curve[i] = (u16)(try header.uint(2))
     var huffman = try nikon_huffman(tree)
     defer huffman.close()
-    var reader = Bits(data = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size))
+    let data = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size)
     let w = mosaic.width
+    # One code tree for the whole image: decode on all threads (serial.lucb).
+    if split == 0 and threads > 1 and w * mosaic.height >= 1048576:
+        if try decode_serial(data, &huffman, .nikon, w * mosaic.height, (i16*)mosaic.data.data, threads):
+            try nikon_samples(mosaic, vertical, curve, threads)
+            return
+    var reader = Bits(data = data)
     for y in 0..<mosaic.height:
         if split > 0 and y == split:
             huffman.close()
@@ -199,6 +205,49 @@ func unpack_nikon(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
                 horizontal[x & 1] = horizontal[x & 1] +% (u16)delta
             let value = (i16)horizontal[x & 1]
             mosaic.data[y * w + x] = curve[(usize)(0 if value < 0 else 0x3fff if value > 0x3fff else value)]
+
+## What `nikon_band` turns from differences into samples.
+struct NikonRows:
+    var mosaic: Mosaic*
+    var curve: const u16*
+
+## The mosaic's differences (in place) to samples: the first two of each row
+## accumulate down the rows from `vertical`, a serial pass; the rest of each
+## row accumulates along it, rows in parallel; then the curve.
+func nikon_samples(mosaic: Mosaic*, vertical: u16[4], curve: const u16[], threads: usize) -> !:
+    let w = mosaic.width
+    let data = mosaic.data.data
+    var column = vertical
+    for y in 0..<mosaic.height:
+        let row = data + y * w
+        for x: usize in 0..<2:
+            let v = (y & 1) * 2 + x
+            column[v] = column[v] +% row[x]
+            row[x] = column[v]
+    var job = NikonRows(mosaic = mosaic, curve = curve.data)
+    try parallel((mosaic.height + band_height - 1) // band_height, threads, (void*)&job, nikon_band)
+
+## Rows [band_height × index, …) of `nikon_samples`.
+func nikon_band(context: void*, index: usize, worker: usize) -> !:
+    let job = (NikonRows*)context
+    let mosaic = job.mosaic
+    let w = mosaic.width
+    let curve = job.curve
+    let end = (usize)math.imin((i64)((index + 1) * band_height), (i64)mosaic.height)
+    for y in index * band_height..<end:
+        let row = mosaic.data.data + y * w
+        var even = row[0]
+        var odd = row[1]
+        for x in 2..<w:
+            if (x & 1) == 0:
+                even = even +% row[x]
+                row[x] = even
+            else:
+                odd = odd +% row[x]
+                row[x] = odd
+        for x in 0..<w:
+            let value = (i16)row[x]
+            row[x] = curve[(usize)(0 if value < 0 else 0x3fff if value > 0x3fff else value)]
 
 ## Nikon code tree `index` as a lookup table.
 func nikon_huffman(index: usize) -> Huffman!:

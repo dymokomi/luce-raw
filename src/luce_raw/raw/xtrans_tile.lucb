@@ -12,9 +12,11 @@
 #
 #==============================================================================================
 
-## Buffers for one tile: eight directions of RGB, their derivatives and
+## Buffers for one tile: the plane as LibRaw's image holds it (with a margin of
+## `source_margin`), eight directions of RGB, their derivatives and
 ## homogeneity, and one direction's CIELAB.
 struct XtransScratch:
+    var source: u16[]
     var rgb: u16[]
     var lab: i32[]
     var derivative: f32[]
@@ -25,6 +27,7 @@ struct XtransScratch:
         let area = xtrans_side * xtrans_side
         var scratch = XtransScratch()
         errdefer scratch.close()
+        scratch.source = try new u16[source_side * source_side * 3] in memory.heap
         scratch.rgb = try new u16[xtrans_directions * area * 3] in memory.heap
         scratch.lab = try new i32[area * 3] in memory.heap
         scratch.derivative = try new f32[xtrans_directions * area] in memory.heap
@@ -33,6 +36,8 @@ struct XtransScratch:
         return scratch
 
     mutating func close():
+        if self.source.length > 0:
+            free(self.source) in memory.heap
         if self.rgb.length > 0:
             free(self.rgb) in memory.heap
         if self.lab.length > 0:
@@ -48,20 +53,10 @@ struct XtransScratch:
 inline func clamp16(value: i64) -> u16:
     return 0 if value < 0 else 65535 if value > 65535 else (u16)value
 
-## LibRaw's LIM: `value` no higher than `high`, then no lower than `low`.
+## LibRaw's LIM: `value` no higher than `high`, then no lower than `low`;
+## branch-free, as whether a value leaves its hexagon's range is data.
 inline func bounded(value: i64, low: u16, high: u16) -> u16:
-    let capped = value if value < (i64)high else (i64)high
-    return (u16)(capped if capped > (i64)low else (i64)low)
-
-## The plane's channel `c` at index `i` as LibRaw's image holds it: the
-## pixel's own color, green's lower limit on red and blue pixels, else zero.
-inline func channel(plane: const Plane*, rings: const Hexagons*, i: i64, c: i64) -> i64:
-    let x = i % (i64)plane.width
-    let y = i // (i64)plane.width
-    let own = xcolor(plane, x, y)
-    if own == c:
-        return (i64)plane.data[(usize)i]
-    return (i64)rings.low[(usize)i] if c == 1 else 0
+    return (u16)max64((i64)low, min64(value, (i64)high))
 
 ## Demosaic the region [top, bottom) × [left, right) and write the rectangle
 ## [x0, x1) × [y0, y1) of it to `out` (RGB rows of `stride` pixels from
@@ -71,39 +66,76 @@ func xtrans_tile(plane: const Plane*, rings: const Hexagons*, table: const LabTa
     let area = xtrans_side * xtrans_side
     let rgb = scratch.rgb
     let w = (i64)plane.width
-    let sg_row = (i64)rings.solitary_row
-    let sg_col = (i64)rings.solitary_col
     let t = (i64)top
     let l = (i64)left
     let mrow = (i64)bottom
     let mcol = (i64)right
-    # Direction 0 holds the pixel as LibRaw's image does; 1 to 3 copy it.
+    assert(bottom - top <= xtrans_side and right - left <= xtrans_side and bottom <= plane.height and right <= plane.width)
+    # The source: each pixel as LibRaw's image holds it, its own color and, on
+    # red and blue pixels, green's lower limit; the green step reads it up to
+    # six pixels beyond the region.
+    let m = (i64)source_margin
+    let ss = source_side
+    let source = scratch.source.data
+    let low = rings.low.data
+    let high = rings.high.data
+    for row in math.imax(0, t - m)..<math.imin((i64)plane.height, mrow + m):
+        let colors = &plane.pattern[(usize)(row % 6) * 6]
+        let first = math.imax(0, l - m)
+        var phase = (usize)(first % 6)
+        let at = (usize)(row * w)
+        var q = source + ((usize)(row - t + m) * ss + (usize)(first - l + m)) * 3
+        for col in first..<math.imin(w, mcol + m):
+            let own = (usize)colors[phase]
+            phase = 0 if phase == 5 else phase + 1
+            let i = at + (usize)col
+            q[0] = 0
+            q[1] = 0
+            q[2] = 0
+            q[own] = plane.data[i]
+            if own != 1:
+                q[1] = low[i]
+            q = q + 3
+    # Direction 0 is the region of the source; 1 to 3 copy it.
     for row in t..<mrow:
-        for col in l..<mcol:
-            let i = row * w + col
-            let o = ((row - t) * ts + col - l) * 3
-            for c: i64 in 0..<3:
-                rgb[(usize)o + (usize)c] = (u16)channel(plane, rings, i, c)
+        let line = source + ((usize)(row - t + m) * ss + (usize)m) * 3
+        memory.copy(rgb[(usize)((row - t) * ts) * 3..], u16[](line, (usize)(mcol - l) * 3), (usize)(mcol - l) * 3)
     for d: usize in 1..<4:
         memory.copy(rgb[d * area * 3..], rgb[..<area * 3], area * 3)
     # Green horizontally, vertically and along both diagonals.
+    let data = rgb.data
     for row in t..<mrow:
+        let colors = &plane.pattern[(usize)(row % 6) * 6]
+        let flip: usize = 1 if (row - (i64)rings.solitary_row) % 3 == 0 else 0
+        let row_base = (usize)(row % 3) * 3
+        var phase = (usize)(l % 6)
         for col in l..<mcol:
-            let f = xcolor(plane, col, row)
+            let f = (isize)colors[phase]
+            let base = (row_base + phase % 3) * 8
+            phase = 0 if phase == 5 else phase + 1
             if f == 1:
                 continue
-            let i = row * w + col
-            let base = (usize)((row % 3) * 3 + col % 3) * 8
-            let hx = rings.plane[base..<base + 8]
-            var color: i64[4]
-            color[0] = 174 * (channel(plane, rings, i + hx[1], 1) + channel(plane, rings, i + hx[0], 1)) - 46 * (channel(plane, rings, i + 2 * hx[1], 1) + channel(plane, rings, i + 2 * hx[0], 1))
-            color[1] = 223 * channel(plane, rings, i + hx[3], 1) + channel(plane, rings, i + hx[2], 1) * 33 + 92 * (channel(plane, rings, i, f) - channel(plane, rings, i - hx[2], f))
-            for c: usize in 0..<2:
-                color[2 + c] = 164 * channel(plane, rings, i + hx[4 + c], 1) + 92 * channel(plane, rings, i - 2 * hx[4 + c], 1) + 33 * (2 * channel(plane, rings, i, f) - channel(plane, rings, i + 3 * hx[4 + c], f) - channel(plane, rings, i - 3 * hx[4 + c], f))
-            let flip: usize = 1 if (row - sg_row) % 3 == 0 else 0
+            let s = source + ((usize)(row - t + m) * ss + (usize)(col - l + m)) * 3
+            let hx = &rings.source[base]
+            let h0 = (isize)hx[0] * 3
+            let h1 = (isize)hx[1] * 3
+            let h2 = (isize)hx[2] * 3
+            let h3 = (isize)hx[3] * 3
+            let h4 = (isize)hx[4] * 3
+            let h5 = (isize)hx[5] * 3
+            let own = (i32)*(s + f)
+            let color0 = 174 *% ((i32)*(s + (h1 + 1)) +% (i32)*(s + (h0 + 1))) -% 46 *% ((i32)*(s + (2 * h1 + 1)) +% (i32)*(s + (2 * h0 + 1)))
+            let color1 = 223 *% (i32)*(s + (h3 + 1)) +% (i32)*(s + (h2 + 1)) *% 33 +% 92 *% (own -% (i32)*(s + (f - h2)))
+            let color2 = 164 *% (i32)*(s + (h4 + 1)) +% 92 *% (i32)*(s + (1 - 2 * h4)) +% 33 *% (2 *% own -% (i32)*(s + (3 * h4 + f)) -% (i32)*(s + (f - 3 * h4)))
+            let color3 = 164 *% (i32)*(s + (h5 + 1)) +% 92 *% (i32)*(s + (1 - 2 * h5)) +% 33 *% (2 *% own -% (i32)*(s + (3 * h5 + f)) -% (i32)*(s + (f - 3 * h5)))
+            let i = (usize)(row * w + col)
             let o = (usize)((row - t) * ts + col - l) * 3 + 1
-            for c: usize in 0..<4:
-                rgb[(c ^ flip) * area * 3 + o] = bounded(color[c] >> 8, rings.low[(usize)i], rings.high[(usize)i])
+            let lo = low[i]
+            let hi = high[i]
+            data[flip * area * 3 + o] = bounded((i64)(color0 >> 8), lo, hi)
+            data[(1 ^ flip) * area * 3 + o] = bounded((i64)(color1 >> 8), lo, hi)
+            data[(2 ^ flip) * area * 3 + o] = bounded((i64)(color2 >> 8), lo, hi)
+            data[(3 ^ flip) * area * 3 + o] = bounded((i64)(color3 >> 8), lo, hi)
     for pass: usize in 0..<3:
         # From the second pass on, directions 4 to 7 are refined copies.
         let shift = 0 if pass == 0 else 4 * area * 3
@@ -119,21 +151,33 @@ func xtrans_tile(plane: const Plane*, rings: const Hexagons*, table: const LabTa
 
 ## Recalculate green from the interpolated values of closer pixels.
 func xtrans_refine_green(plane: const Plane*, rings: const Hexagons*, rgb: u16[], t: i64, l: i64, mrow: i64, mcol: i64):
-    let ts = (i64)xtrans_side
-    let area = (i64)(xtrans_side * xtrans_side)
+    let area = xtrans_side * xtrans_side
     let w = (i64)plane.width
+    let data = rgb.data
+    let low = rings.low.data
+    let high = rings.high.data
+    var offsets: isize[72]
+    for i: usize in 0..<72:
+        offsets[i] = (isize)rings.tile[i] * 3
     for row in t + 2..<mrow - 2:
+        let colors = &plane.pattern[(usize)(row % 6) * 6]
+        let flip: usize = 1 if (row - (i64)rings.solitary_row) % 3 == 0 else 0
+        let row_base = (usize)(row % 3) * 3
+        var phase = (usize)((l + 2) % 6)
         for col in l + 2..<mcol - 2:
-            let f = xcolor(plane, col, row)
+            let f = (isize)colors[phase]
+            let base = (row_base + phase % 3) * 8
+            phase = 0 if phase == 5 else phase + 1
             if f == 1:
                 continue
-            let base = (usize)((row % 3) * 3 + col % 3) * 8
-            let flip: i64 = 1 if (row - (i64)rings.solitary_row) % 3 == 0 else 0
             let i = (usize)(row * w + col)
-            for d: i64 in 3..<6:
-                let hd = rings.tile[base + (usize)d]
-                let rix = (((d - 2) ^ flip) * area + (row - t) * ts + col - l) * 3
-                let a = rix - 2 * hd * 3
-                let b = rix + hd * 3
-                let value = (i64)rgb[(usize)(a + 1)] + 2 * (i64)rgb[(usize)(b + 1)] - (i64)rgb[(usize)(a + f)] - 2 * (i64)rgb[(usize)(b + f)] + 3 * (i64)rgb[(usize)(rix + f)]
-                rgb[(usize)(rix + 1)] = bounded(value // 3, rings.low[i], rings.high[i])
+            let at = (usize)tile_index(row, col, t, l)
+            let lo = low[i]
+            let hi = high[i]
+            for d: usize in 3..<6:
+                let hd = offsets[base + d]
+                let q = data + (((d - 2) ^ flip) * area * 3 + at)
+                let a = q - 2 * hd
+                let b = q + hd
+                let value = (i32)a[1] +% 2 *% (i32)b[1] -% (i32)*(a + f) -% 2 *% (i32)*(b + f) +% 3 *% (i32)*(q + f)
+                q[1] = bounded((i64)third32(value), lo, hi)

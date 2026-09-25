@@ -40,8 +40,8 @@ func unpack(file: const u8[], meta: const Meta*, threads: usize) -> Mosaic!:
     errdefer mosaic.close()
     match meta.coding:
         .unpacked, .packed, .ljpeg, .deflate, .sony_ljpeg: try unpack_tiles(file, meta, &mosaic, threads)
-        .canon: try unpack_canon(file, meta, &mosaic)
-        .nikon: try unpack_nikon(file, meta, &mosaic)
+        .canon: try unpack_canon(file, meta, &mosaic, threads)
+        .nikon: try unpack_nikon(file, meta, &mosaic, threads)
         .sony_arw2: try unpack_arw2(file, meta, &mosaic, threads)
         .olympus: try unpack_olympus(file, meta, &mosaic)
         .panasonic: try unpack_panasonic(file, meta, &mosaic)

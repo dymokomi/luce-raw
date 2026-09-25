@@ -1,0 +1,301 @@
+#==============================================================================================
+#
+#   raw/serial - Serial Huffman streams decoded on several threads
+#
+#   DESCRIPTION:
+#       Lossless JPEG (CR2) and Nikon's NEF code a whole sensor as one stream of
+#       Huffman codes, each followed by the bits of a difference, with no restart
+#       points. Such codes resynchronise: a decoder started at an arbitrary bit
+#       soon falls onto the true symbol boundaries and stays on them. The stream
+#       is cut into chunks. First each chunk's decoder records where it believes
+#       symbols start in its first `sync_window` bits; then each decoder runs on
+#       past the end of its chunk until it lands on one of the next chunk's
+#       recorded starts. Chunk 0 starts true, so by induction every meeting point
+#       is a true boundary, and the symbols between meetings give each chunk's
+#       true start and count. Finally the chunks decode their differences into
+#       place in parallel; the caller turns differences into samples. A chunk
+#       that never meets its neighbour makes `decode_serial` answer false, and
+#       the caller decodes serially instead.
+#
+#==============================================================================================
+
+## How a stream's symbols carry their differences: JPEG's magnitude category
+## and value bits, or Nikon's length and shift.
+enum SymbolCode:
+    jpeg
+    nikon
+
+## Bits after a chunk's speculative start within which it records symbol starts.
+let sync_window: u64 = 8192
+
+## One chunk of the stream and what the phases learn about it.
+struct Chunk:
+    var begin: u64
+    var starts: u64[]
+    var recorded: usize
+    var sync: u64
+    var skipped: usize
+    var reach: usize
+    var first: usize
+    var count: usize
+    var met: bool
+
+## The stream, its code and the chunks being decoded.
+struct SerialJob:
+    var data: const u8[]
+    var table: const u16*
+    var shift: u32
+    var code: SymbolCode
+    var symbols: usize
+    var chunks: Chunk*
+    var chunk_count: usize
+    var deltas: i16*
+    var phase: u32
+
+## One phase of chunk `index`: 0 records symbol starts, 1 meets the next
+## chunk, 2 decodes the chunk's differences into place.
+func serial_chunk(context: void*, index: usize, worker: usize) -> !:
+    let job = (SerialJob*)context
+    let chunk = job.chunks + index
+    let phase = job.phase
+    let last = index + 1 == job.chunk_count
+    if phase == 1 and last:
+        return
+    let start = chunk.sync if phase == 2 else chunk.begin
+    let window_end = chunk.begin + sync_window
+    let next = job.chunks + (index if last else index + 1)
+    let out = job.deltas + chunk.first
+    var reader = Bits(data = job.data, position = (usize)(start >> 3))
+    reader.fill()
+    let offset = (u32)(start & 7)
+    reader.buffer = reader.buffer << offset
+    reader.count -= offset
+    var buffer = reader.buffer
+    var count = reader.count
+    var position = start
+    var n: usize = 0
+    var k: usize = 0
+    let table = job.table
+    let shift = job.shift
+    let nikon = job.code == .nikon
+    while true:
+        if phase == 0:
+            if position >= window_end or n == chunk.starts.length:
+                break
+            chunk.starts[n] = position
+            chunk.recorded = n + 1
+        elif phase == 1:
+            if position >= next.begin:
+                while k < next.recorded and next.starts[k] < position:
+                    k += 1
+                if k == next.recorded:
+                    return
+                if next.starts[k] == position:
+                    next.sync = position
+                    next.skipped = k
+                    chunk.reach = n
+                    chunk.met = true
+                    return
+        elif n == chunk.count:
+            break
+        if count < 32:
+            reader.buffer = buffer
+            reader.count = count
+            reader.fill()
+            buffer = reader.buffer
+            count = reader.count
+        let entry = table[buffer >> shift]
+        var used: u32 = 1
+        var delta: i32 = 0
+        if entry == 0:
+            if phase == 2:
+                error(corrupt, "invalid Huffman code in raw data")
+        elif nikon:
+            let code = (u32)(entry >> 8)
+            let symbol = (u32)(entry & 255)
+            let length = symbol & 15
+            let scale = symbol >> 4
+            if scale > length:
+                if phase == 2:
+                    error(corrupt, "invalid NEF difference code")
+            else:
+                let take = length - scale
+                let bits = (u32)((buffer << code) >> (64 - take)) if take > 0 else 0
+                used = code + take
+                if length > 0:
+                    delta = ((((i32)bits << 1) +% 1) << scale) >> 1
+                    if (delta & ((i32)1 << (length - 1))) == 0:
+                        delta = delta -% (((i32)1 << length) - (1 if scale == 0 else 0))
+        else:
+            let length = (u32)(entry >> 8)
+            let category = (u32)(entry & 255)
+            used = length
+            if category == 16:
+                delta = -32768
+            elif category > 0:
+                let value = (i32)((buffer << length) >> (64 - category))
+                delta = value if value >= ((i32)1 << (category - 1)) else value -% ((i32)1 << category) +% 1
+                used = length + category
+        buffer = buffer << used
+        count -= used
+        position += (u64)used
+        if phase == 2:
+            out[n] = (i16)delta
+        n += 1
+    if phase == 2 and last and count < reader.padding:
+        error(corrupt, "raw bit stream is truncated")
+
+## Decode the `symbols` differences of the stream `data` (no byte stuffing)
+## coded with `table` (entries as Huffman.build makes them, indexed by the next
+## `bits` bits) into `deltas`, on `threads`. False when the stream would not
+## resynchronise; nothing is decoded then.
+func decode_serial(data: const u8[], table: const Huffman*, code: SymbolCode, symbols: usize, deltas: i16*, threads: usize) -> bool!:
+    let count = (usize)math.imin((i64)threads * 2, (i64)(data.length >> 16))
+    if count < 2:
+        return false
+    let chunks = try new Chunk[count] in memory.heap
+    defer release_chunks(chunks)
+    for j in 0..<count:
+        chunks[j].begin = (u64)(data.length * j // count) * 8
+        chunks[j].starts = try new u64[(usize)sync_window] in memory.heap
+    var job = SerialJob(data = data, table = table.table.data, shift = 64 - table.bits, code = code, symbols = symbols, chunks = chunks.data, chunk_count = count, deltas = deltas)
+    for phase: u32 in 0..<2:
+        job.phase = phase
+        try parallel(count, threads, (void*)&job, serial_chunk)
+    # Each chunk's true symbols run from its meeting point to the next one.
+    var first: usize = 0
+    for j in 0..<count:
+        let chunk = &chunks[j]
+        chunk.first = first
+        if j + 1 < count:
+            if not chunk.met or chunk.reach < chunk.skipped:
+                return false
+            chunk.count = chunk.reach - chunk.skipped
+        else:
+            if first > symbols:
+                return false
+            chunk.count = symbols - first
+        first += chunk.count
+    job.phase = 2
+    try parallel(count, threads, (void*)&job, serial_chunk)
+    return true
+
+## Free the chunks and their start lists.
+func release_chunks(chunks: Chunk[]):
+    for i in 0..<chunks.length:
+        if chunks[i].starts.length > 0:
+            free(chunks[i].starts) in memory.heap
+    free(chunks) in memory.heap
+
+## A JPEG scan's entropy-coded bytes from `start` of `data` with the zero
+## stuffed after each 0xFF dropped, up to the first marker: the buffer
+## (release it) and how many of its bytes are used.
+func unstuff(data: const u8[], start: usize) -> (u8[], usize)!:
+    let out = try alloc u8[data.length - start] in memory.heap
+    var used: usize = 0
+    var at = start
+    let source = data.data
+    let target = out.data
+    while at < data.length:
+        # Eight bytes at a time while none is 0xFF.
+        if at + 8 <= data.length:
+            let word = memory.read[u64]((void*)(source + at))
+            let inverse = ~word
+            if ((inverse -% 0x0101010101010101) & ~inverse & 0x8080808080808080) == 0:
+                memory.write[u64]((void*)(target + used), word)
+                used += 8
+                at += 8
+                continue
+        let byte = source[at]
+        if byte == 0xff:
+            if at + 1 < data.length and source[at + 1] == 0:
+                target[used] = 0xff
+                used += 1
+                at += 2
+                continue
+            break
+        target[used] = byte
+        used += 1
+        at += 1
+    return (out, used)
+
+## Every sample of `jpeg`'s scan (whose bytes are `data`) decoded on
+## `threads`, line after line; empty when the scan is better read serially:
+## restart intervals, components with different tables, a small scan, or a
+## stream that would not resynchronise.
+func decode_jpeg_parallel(jpeg: LosslessJpeg*, data: const u8[], threads: usize) -> u16[]!:
+    var empty: u16[]
+    let nc = jpeg.components
+    let line = jpeg.width * nc
+    let total = line * jpeg.height
+    if threads < 2 or jpeg.restart != 0 or total < 1048576 or jpeg.line != 0:
+        return empty
+    # One table must serve every component: the chunks cannot know which
+    # component a symbol belongs to until they meet.
+    let selector = jpeg.selectors[0]
+    for c in 1..<nc:
+        if not same_table(&jpeg.tables[selector], &jpeg.tables[jpeg.selectors[c]]):
+            return empty
+    let (stream, used) = try unstuff(data, jpeg.reader.position)
+    defer free(stream) in memory.heap
+    let samples = try new u16[total] in memory.heap
+    errdefer free(samples) in memory.heap
+    let out = samples.data
+    if not try decode_serial(stream[..<used], &jpeg.tables[selector], .jpeg, total, (i16*)out, threads):
+        free(samples) in memory.heap
+        return empty
+    # Differences to samples in place: each line's first samples from the
+    # line above (the first line's from the midpoint), the rest by predictor.
+    let base = (i32)1 << (jpeg.precision - 1)
+    let p = jpeg.predictor
+    for y in 0..<jpeg.height:
+        let row = out + y * line
+        for c in 0..<nc:
+            let prediction = base if y == 0 else (i32)*(row - line + c)
+            row[c] = (u16)((prediction +% (i32)(i16)row[c]) & 65535)
+        if y == 0 or p != 1:
+            jpeg_line(out, y, line, nc, p)
+    if p == 1:
+        var job = JpegLines(samples = out, line = line, nc = nc, lines = jpeg.height)
+        try parallel((jpeg.height + band_height - 1) // band_height, threads, (void*)&job, jpeg_lines)
+    jpeg.line = jpeg.height
+    return samples
+
+## Whether two Huffman tables decode alike.
+func same_table(a: const Huffman*, b: const Huffman*) -> bool:
+    if a.bits != b.bits or a.table.length != b.table.length:
+        return false
+    for i in 0..<a.table.length:
+        if a.table[i] != b.table[i]:
+            return false
+    return true
+
+## What `jpeg_lines` reconstructs.
+struct JpegLines:
+    var samples: u16*
+    var line: usize
+    var nc: usize
+    var lines: usize
+
+## Lines [band_height × index, …) from their differences, predictor 1; the
+## first line is already done.
+func jpeg_lines(context: void*, index: usize, worker: usize) -> !:
+    let job = (JpegLines*)context
+    let end = (usize)math.imin((i64)((index + 1) * band_height), (i64)job.lines)
+    for y in (usize)math.imax(1, (i64)(index * band_height))..<end:
+        jpeg_line(job.samples, y, job.line, job.nc, 1)
+
+## Line `y` of `line` samples from its differences after its first `nc`,
+## with predictor `p` (the first line always predicts from the left).
+func jpeg_line(samples: u16*, y: usize, line: usize, nc: usize, p: u32):
+    let row = samples + y * line
+    let above = row - (line if y > 0 else 0)
+    for at in nc..<line:
+        let delta = (i32)(i16)row[at]
+        let a = (i32)row[at - nc]
+        var prediction = a
+        if y > 0 and p != 1:
+            let b = (i32)above[at]
+            let d = (i32)above[at - nc]
+            prediction = b if p == 2 else d if p == 3 else a +% b -% d if p == 4 else a +% ((b -% d) >> 1) if p == 5 else b +% ((a -% d) >> 1) if p == 6 else (a +% b) >> 1
+        row[at] = (u16)((prediction +% delta) & 65535)

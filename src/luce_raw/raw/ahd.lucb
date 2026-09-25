@@ -55,12 +55,6 @@ inline func clip16(value: i64) -> usize:
 inline func clamp_sample(value: i32) -> u16:
     return 0 if value < 0 else 65535 if value > 65535 else (u16)value
 
-## `value` limited to the range its two neighbours span.
-inline func between(value: i32, a: i32, b: i32) -> u16:
-    let low = a if a < b else b
-    let high = b if a < b else a
-    return (u16)(low if value < low else high if value > high else value)
-
 ## Scratch for one tile: two directions of RGB, Lab and homogeneity over the
 ## tile and a three-pixel apron.
 struct AhdScratch:
@@ -134,11 +128,15 @@ func ahd_green(plane: const Plane*, horizontal: noalias u16*, vertical: noalias 
                 let left = (i32)*(s - 1)
                 let right = (i32)*(s + 1)
                 let h = ((left +% v +% right) *% 2 -% (i32)*(s - 2) -% (i32)*(s + 2)) >> 2
-                hrow[tx *% 3] = between(h, left, right)
+                let low_h = min32(left, right)
+                let high_h = max32(left, right)
+                hrow[tx *% 3] = (u16)max32(low_h, min32(h, high_h))
                 let up = (i32)*(s - w)
                 let down = (i32)*(s + w)
                 let u = ((up +% v +% down) *% 2 -% (i32)*(s - w2) -% (i32)*(s + w2)) >> 2
-                vrow[tx *% 3] = between(u, up, down)
+                let low_v = min32(up, down)
+                let high_v = max32(up, down)
+                vrow[tx *% 3] = (u16)max32(low_v, min32(u, high_v))
                 tx +%= 2
 
 ## Red and blue from one direction's green, and the CIELAB of the result.
@@ -198,7 +196,8 @@ func ahd_red_blue(plane: const Plane*, table: const LabTable*, rgb: noalias u16*
                 tx +%= 2
 
 ## For each pixel and direction, how many of its four neighbours lie within
-## the tighter direction's lightness and chroma tolerance.
+## the tighter direction's lightness and chroma tolerance. Branch-free: which
+## neighbours pass is data, and mispredicted branches would dominate.
 func ahd_homogeneity(lab_h: const i32*, lab_v: const i32*, out_h: noalias u8*, out_v: noalias u8*, tw: usize, th: usize):
     let row = tw * 3
     for ty in 2..<th - 2:
@@ -223,18 +222,32 @@ func ahd_homogeneity(lab_h: const i32*, lab_v: const i32*, out_h: noalias u8*, o
             let va1 = difference_ab(v, v + 3)
             let va2 = difference_ab(v, v - row)
             let va3 = difference_ab(v, v + row)
-            let hl = hl0 if hl0 > hl1 else hl1
-            let vl = vl2 if vl2 > vl3 else vl3
-            let leps = hl if hl < vl else vl
-            let ha = ha0 if ha0 > ha1 else ha1
-            let va = va2 if va2 > va3 else va3
-            let abeps = ha if ha < va else va
-            out_h[at] = (u8)(hl0 <= leps and ha0 <= abeps) +% (u8)(hl1 <= leps and ha1 <= abeps) +% (u8)(hl2 <= leps and ha2 <= abeps) +% (u8)(hl3 <= leps and ha3 <= abeps)
-            out_v[at] = (u8)(vl0 <= leps and va0 <= abeps) +% (u8)(vl1 <= leps and va1 <= abeps) +% (u8)(vl2 <= leps and va2 <= abeps) +% (u8)(vl3 <= leps and va3 <= abeps)
+            let leps = min32(max32(hl0, hl1), max32(vl2, vl3))
+            let abeps = min64(max64(ha0, ha1), max64(va2, va3))
+            out_h[at] = ((u8)(hl0 <= leps) & (u8)(ha0 <= abeps)) +% ((u8)(hl1 <= leps) & (u8)(ha1 <= abeps)) +% ((u8)(hl2 <= leps) & (u8)(ha2 <= abeps)) +% ((u8)(hl3 <= leps) & (u8)(ha3 <= abeps))
+            out_v[at] = ((u8)(vl0 <= leps) & (u8)(va0 <= abeps)) +% ((u8)(vl1 <= leps) & (u8)(va1 <= abeps)) +% ((u8)(vl2 <= leps) & (u8)(va2 <= abeps)) +% ((u8)(vl3 <= leps) & (u8)(va3 <= abeps))
+
+## Branch-free maxima and minima of small values (their difference fits).
+inline func max32(a: i32, b: i32) -> i32:
+    let d = a -% b
+    return b +% (d & ~(d >> 31))
+
+inline func min32(a: i32, b: i32) -> i32:
+    let d = a -% b
+    return b +% (d & (d >> 31))
+
+inline func max64(a: i64, b: i64) -> i64:
+    let d = a -% b
+    return b +% (d & ~(d >> 63))
+
+inline func min64(a: i64, b: i64) -> i64:
+    let d = a -% b
+    return b +% (d & (d >> 63))
 
 inline func difference_l(a: const i32*, b: const i32*) -> i32:
     let d = *a -% *b
-    return d if d >= 0 else -%d
+    let sign = d >> 31
+    return (d ^ sign) -% sign
 
 inline func difference_ab(a: const i32*, b: const i32*) -> i64:
     let da = (i64)a[1] -% (i64)b[1]
@@ -260,15 +273,11 @@ func ahd_combine(horizontal: const u16*, vertical: const u16*, homogeneous_h: co
             let a = horizontal + at *% 3
             let b = vertical + at *% 3
             let target = target_row + (tx - 3) *% 3
-            if h > v:
-                target[0] = a[0]
-                target[1] = a[1]
-                target[2] = a[2]
-            elif v > h:
-                target[0] = b[0]
-                target[1] = b[1]
-                target[2] = b[2]
-            else:
-                target[0] = (u16)(((u32)a[0] +% (u32)b[0]) >> 1)
-                target[1] = (u16)(((u32)a[1] +% (u32)b[1]) >> 1)
-                target[2] = (u16)(((u32)a[2] +% (u32)b[2]) >> 1)
+            # Branch-free: horizontal, vertical, or the mean of both on a tie.
+            let take_h = (u32)(h > v)
+            let take_v = (u32)(v > h)
+            let tie = 1 - take_h - take_v
+            for c: usize in 0..<3:
+                let x = (u32)a[c]
+                let y = (u32)b[c]
+                target[c] = (u16)(x *% take_h +% y *% take_v +% ((x +% y) >> 1) *% tie)
