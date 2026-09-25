@@ -1,0 +1,111 @@
+#==============================================================================================
+#
+#   raw/develop - From the balanced plane to the Raster's linear RGB
+#
+#   DESCRIPTION:
+#       The plane is cut into tiles that worker threads take in turn (parallel.lucb). Each tile is
+#       demosaiced (AHD inside the five-pixel border, the border by averaging; or
+#       bilinear), multiplied by the camera-to-sRGB matrix and the exposure gain, and
+#       written through the orientation into the Raster's pixels. Tiles share
+#       nothing but the read-only plane, so the result does not depend on threads.
+#
+#==============================================================================================
+
+let tile_size: usize = 256
+
+## The shared, read-only description of one develop.
+struct Job:
+    var plane: const Plane*
+    var table: const LabTable*
+    var look: const Development*
+    var image: Raster*
+    var quality: Quality
+    var gain: f64
+    var orientation: u64
+    var across: usize
+
+## Demosaic one tile with its own scratch; `parallel` calls it.
+func develop_item(context: void*, index: usize) -> !:
+    let job = (Job*)context
+    var scratch = AhdScratch()
+    defer scratch.close()
+    if job.quality == .best and job.plane.channels == 1:
+        scratch = try AhdScratch.create(tile_size)
+    let rgb = try new u16[tile_size * tile_size * 3] in memory.heap
+    defer free(rgb) in memory.heap
+    develop_tile(job, &scratch, rgb, index)
+
+## Demosaic tile `index` and write it out.
+func develop_tile(job: Job*, scratch: AhdScratch*, rgb: u16[], index: usize):
+    let plane = job.plane
+    let x0 = index % job.across * tile_size
+    let y0 = index // job.across * tile_size
+    let x1 = math.imin((i64)(x0 + tile_size), (i64)plane.width)
+    let y1 = math.imin((i64)(y0 + tile_size), (i64)plane.height)
+    let w = (usize)x1 - x0
+    let h = (usize)y1 - y0
+    if plane.channels == 3:
+        for y in 0..<h:
+            let source = ((y0 + y) * plane.width + x0) * 3
+            memory.copy(rgb[y * w * 3..], plane.data[source..], w * 3)
+    elif job.quality == .fast:
+        bilinear_tile(plane, x0, y0, (usize)x1, (usize)y1, rgb, w, 0, 0)
+    else:
+        # AHD inside the border, plain averages in it.
+        let border: usize = 5
+        let ix0 = math.imax((i64)x0, (i64)border)
+        let iy0 = math.imax((i64)y0, (i64)border)
+        let ix1 = math.imin(x1, (i64)plane.width - (i64)border)
+        let iy1 = math.imin(y1, (i64)plane.height - (i64)border)
+        let inner = ix0 < ix1 and iy0 < iy1
+        if inner:
+            ahd_tile(plane, job.table, scratch, (usize)ix0, (usize)iy0, (usize)ix1, (usize)iy1, rgb, w, (usize)ix0 - x0, (usize)iy0 - y0)
+        for y in y0..<(usize)y1:
+            for x in x0..<(usize)x1:
+                if inner and (i64)x >= ix0 and (i64)x < ix1 and (i64)y >= iy0 and (i64)y < iy1:
+                    continue
+                let at = ((y - y0) * w + x - x0) * 3
+                mosaic_pixel(plane, x, y, false, rgb[at..<at + 3])
+    write_tile(job, rgb, x0, y0, w, h)
+
+## Matrix, gain and orientation from tile RGB into the Raster.
+func write_tile(job: Job*, rgb: const u16[], x0: usize, y0: usize, w: usize, h: usize):
+    let m = job.look.to_rgb
+    let k = job.gain / 65535.0
+    let sw = job.plane.width
+    let sh = job.plane.height
+    let o = job.orientation
+    let image = job.image
+    for y in 0..<h:
+        for x in 0..<w:
+            let at = (y * w + x) * 3
+            let r = (f64)rgb[at] * k
+            let g = (f64)rgb[at + 1] * k
+            let b = (f64)rgb[at + 2] * k
+            let sx = x0 + x
+            let sy = y0 + y
+            var dx = sx
+            var dy = sy
+            if o == 2 or o == 3:
+                dx = sw - 1 - sx
+            if o == 3 or o == 4:
+                dy = sh - 1 - sy
+            if o >= 5:
+                dx = sh - 1 - sy if o == 6 or o == 7 else sy
+                dy = sw - 1 - sx if o == 7 or o == 8 else sx
+            let target = (dy * image.width + dx) * 3
+            let red = m[0] * r + m[1] * g + m[2] * b
+            let green = m[3] * r + m[4] * g + m[5] * b
+            let blue = m[6] * r + m[7] * g + m[8] * b
+            image.pixels[target] = red if red > 0.0 else 0.0
+            image.pixels[target + 1] = green if green > 0.0 else 0.0
+            image.pixels[target + 2] = blue if blue > 0.0 else 0.0
+
+## Demosaic `plane` into `image`'s pixels with `look`'s matrix, on `threads`.
+func develop_plane(plane: const Plane*, look: const Development*, image: Raster*, quality: Quality, gain: f64, orientation: u64, threads: usize) -> !:
+    var table = try LabTable.create(look.to_xyz)
+    defer table.close()
+    let across = (plane.width + tile_size - 1) // tile_size
+    let down = (plane.height + tile_size - 1) // tile_size
+    var job = Job(plane = plane, table = &table, look = look, image = image, quality = quality, gain = gain, orientation = orientation, across = across)
+    try parallel(across * down, threads, (void*)&job, develop_item)

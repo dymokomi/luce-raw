@@ -1,0 +1,165 @@
+#==============================================================================================
+#
+#   raw/canon - Canon CR2
+#
+#   DESCRIPTION:
+#       A CR2 is a TIFF whose fourth directory holds the raw as one lossless JPEG,
+#       usually cut into vertical slices (tag 0xc640) that the JPEG's lines fill one
+#       after another. The maker note gives the sensor's image rectangle (0x00e0) and
+#       the as-shot white balance (0x4001, at an offset that depends on its version).
+#       The black level is measured from the masked columns on the left, and the
+#       color filter's phase comes from a table of sensor geometries.
+#
+#==============================================================================================
+
+## Canon sensor geometries: raw width, raw height, and a left and top margin
+## at which the filter pattern starts with red, after LibRaw's table.
+let canon_geometry: u16[232] = [
+    1944, 1416, 0, 0, 2144, 1560, 4, 8, 2224, 1456, 48, 6, 2376, 1728, 12, 6, 2672, 1968, 12, 6,
+    3152, 2068, 64, 12, 3160, 2344, 44, 12, 3344, 2484, 4, 6, 3516, 2328, 42, 14, 3596, 2360, 74, 12,
+    3744, 2784, 52, 12, 3944, 2622, 30, 18, 3948, 2622, 42, 18, 3984, 2622, 76, 20, 4032, 2656, 112, 44,
+    4104, 3048, 48, 12, 4116, 2178, 4, 2, 4152, 2772, 192, 12, 4160, 3124, 104, 11, 4176, 3062, 96, 17,
+    4192, 3062, 96, 17, 4312, 2876, 22, 18, 4352, 2850, 144, 46, 4352, 2874, 62, 18, 4476, 2954, 90, 34,
+    4480, 3348, 12, 10, 4480, 3366, 80, 50, 4496, 3366, 80, 50, 4768, 3516, 96, 16, 4832, 3204, 62, 26,
+    4832, 3228, 62, 51, 5108, 3349, 98, 13, 5120, 3318, 142, 45, 5280, 3528, 72, 52, 5344, 3516, 142, 51,
+    5344, 3584, 126, 100, 5344, 3950, 98, 18, 5360, 3516, 158, 51, 5568, 3708, 72, 38, 5632, 3710, 96, 17,
+    5712, 3774, 62, 20, 5792, 3804, 158, 51, 5920, 3950, 122, 80, 6096, 4051, 76, 35, 6096, 4056, 72, 34,
+    6288, 4056, 264, 36, 6384, 4224, 120, 44, 6880, 4544, 136, 42, 6888, 4546, 146, 48, 7128, 4732, 144, 72,
+    8896, 5920, 160, 64, 6192, 4152, 160, 120, 6192, 4060, 168, 52, 6188, 4120, 154, 96, 8480, 5650, 258, 162,
+    5376, 3574, 258, 162, 6160, 4144, 128, 120, 0, 0, 0, 0]
+
+## The short index of the as-shot white balance in Canon's color data, by its
+## length, which names its version.
+func canon_as_shot(count: usize) -> usize:
+    if count == 582: return 0x19
+    if count == 653: return 0x18
+    if count == 5120 or count == 1816 or count == 1820 or count == 1824: return 0x47
+    if count == 2024 or count == 3656: return 0x55
+    if count == 3973 or count == 3778 or count == 4528: return 0x69
+    return 0x3f
+
+## The short index of the per-channel black levels in Canon's color data, by
+## its length and sub-version; zero when unknown.
+func canon_black_at(count: usize, version: u64) -> usize:
+    if count == 582: return 0xa6
+    if count == 653: return 0x11e
+    if count == 796: return 0xc4
+    if count == 674 or count == 692 or count == 702 or count == 1227 or count == 1250 or count == 1251 or count == 1337 or count == 1338 or count == 1346:
+        return 0x2b4 if version == 4 or version == 5 else 0x2cb if version == 6 or version == 7 else 0x2cf if version == 9 else 0xe7
+    if count == 1273 or count == 1275: return 0x1df
+    if count == 1312 or count == 1313 or count == 1316 or count == 1506:
+        return 0x1f8 if version == 10 else 0x2d8 if version == 11 else 0
+    if count == 1560 or count == 1592 or count == 1353 or count == 1602:
+        return 0x22c if version == 14 else 0x30a
+    if count == 1816 or count == 1820 or count == 1824 or count == 2024 or count == 3656 or count == 3973 or count == 3778:
+        return 0x69 + 0x213
+    return 0
+
+## Fill `meta` from a Canon CR2.
+func parse_cr2(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
+    meta.format = "CR2"
+    if file[8] != 'C' or file[9] != 'R':
+        error(unsupported, "only CR2 Canon raws are supported, not CRW or CR3")
+    if starts(meta.model, "Canon "):
+        meta.model = (str)meta.model.bytes[6..]
+    let main = try tree.at(0)
+    meta.orientation = try main.uint(274, 1)
+    var raw = try tree.holding(50752)
+    if raw == none and tree.count >= 4:
+        raw = try tree.at(3)
+    let directory = raw else error(corrupt, "CR2 has no raw directory")
+    if let slices = try directory.find(50752):
+        if slices.count == 3:
+            for i: usize in 0..<3:
+                meta.slices[i] = (usize)(try slices.uint(i))
+    meta.data_offset = (usize)(try directory.uint(273))
+    meta.data_size = (usize)(try directory.uint(279))
+    var jpeg = try LosslessJpeg.open(try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size))
+    defer jpeg.close()
+    meta.coding = .canon
+    meta.bits = (usize)jpeg.precision
+    meta.raw_width = jpeg.width * jpeg.components
+    meta.raw_height = jpeg.height
+    if meta.raw_width > 4 * meta.raw_height:
+        meta.raw_width = meta.raw_width // 2
+        meta.raw_height = meta.raw_height * 2
+    if meta.slices[0] > 0 and meta.slices[0] * meta.slices[1] + meta.slices[2] != meta.raw_width:
+        error(corrupt, "CR2 slices do not cover the sensor")
+    var red_top: usize = 0
+    var red_left: usize = 0
+    var known = false
+    var i: usize = 0
+    while canon_geometry[i] != 0:
+        if (usize)canon_geometry[i] == meta.raw_width and (usize)canon_geometry[i + 1] == meta.raw_height:
+            red_left = (usize)canon_geometry[i + 2]
+            red_top = (usize)canon_geometry[i + 3]
+            known = true
+        i += 4
+    let exif = tree.exif else error(corrupt, "CR2 has no EXIF directory")
+    let note = try exif.find(37500) else error(corrupt, "CR2 has no maker note")
+    let maker = try Directory.open(file, 0, note.position, main.little)
+    if let borders = try maker.find(0xe0):
+        if borders.count >= 9:
+            let left = (usize)(try borders.uint(5))
+            let top = (usize)(try borders.uint(6))
+            let right = (usize)(try borders.uint(7))
+            let bottom = (usize)(try borders.uint(8))
+            if right > left and bottom > top and right < meta.raw_width and bottom < meta.raw_height:
+                meta.left = left
+                meta.top = top
+                meta.width = right - left + 1
+                meta.height = bottom - top + 1
+    if not known:
+        red_top = (meta.top + 1) & ~(usize)1
+        red_left = (meta.left + 1) & ~(usize)1
+    # Red at (red_top, red_left) in sensor coordinates; `cfa` is from the
+    # active area's corner.
+    # `rggb` is each active 2×2 position's index in Canon's R, G1, G2, B order.
+    var rggb: usize[4]
+    for p: usize in 0..<4:
+        let y = (meta.top + p // 2 + 2 - red_top % 2) % 2
+        let x = (meta.left + p % 2 + 2 - red_left % 2) % 2
+        rggb[p] = y * 2 + x
+        meta.cfa[p] = 0 if rggb[p] == 0 else 2 if rggb[p] == 3 else 1
+    # Black: measured left of the image for known sensors, as LibRaw does;
+    # otherwise the levels the color data states.
+    if known and red_left > 4:
+        meta.mask = [meta.top, 2, meta.top + meta.height, red_left - 2]
+    if let colors = try maker.find(0x4001):
+        let black_at = canon_black_at(colors.count, try colors.uint(1)) if colors.count > 1 else 0
+        if not known and black_at > 0 and colors.count > black_at + 3:
+            meta.black_rows = 2
+            meta.black_columns = 2
+            for p: usize in 0..<4:
+                meta.black[p] = try colors.real(black_at + rggb[p])
+        let at = canon_as_shot(colors.count)
+        if colors.count > at + 3 and colors.kind == 3:
+            let r = try colors.real(at)
+            let g = (try colors.real(at + 1) + try colors.real(at + 2)) * 0.5
+            let b = try colors.real(at + 3)
+            if r > 0.0 and g > 0.0 and b > 0.0:
+                meta.neutral = [g / r, 1.0, g / b]
+                meta.neutral_known = true
+
+## The CR2's lossless JPEG, its lines laid into slices or straight rows.
+func unpack_canon(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
+    var jpeg = try LosslessJpeg.open(try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size))
+    defer jpeg.close()
+    let w = mosaic.width
+    let h = mosaic.height
+    var line: const u16[] = try jpeg.next()
+    var used: usize = 0
+    let count = meta.slices[0] + 1 if meta.slices[0] > 0 else 1
+    for slice in 0..<count:
+        let x0 = slice * meta.slices[1]
+        let span = w if meta.slices[0] == 0 else meta.slices[1] if slice < meta.slices[0] else meta.slices[2]
+        for y in 0..<h:
+            var x: usize = 0
+            while x < span:
+                if used == line.length:
+                    line = try jpeg.next()
+                    used = 0
+                let take = math.imin((i64)(span - x), (i64)(line.length - used))
+                memory.copy(mosaic.data[y * w + x0 + x..], line[used..], (usize)take)
+                used += (usize)take
+                x += (usize)take

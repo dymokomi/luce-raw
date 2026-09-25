@@ -1,0 +1,96 @@
+#==============================================================================================
+#
+#   raw - Camera RAW files to linear-light RGB
+#
+#   DESCRIPTION:
+#       Reads the sensor data of a camera RAW file and develops it into scene-linear
+#       RGB: black and white levels, white balance, highlight clipping, demosaicing
+#       and the camera's color matrix into linear sRGB, then orientation. Everything
+#       is Luce Base; no platform codec is used. Fragments, in ORDER:
+#
+#       module.lucb    public options, white balance and file information types
+#       tiff.lucb      TIFF directories and their entries, maker notes included
+#       bits.lucb      bit readers and canonical Huffman tables
+#       ljpeg.lucb     lossless JPEG (ITU T.81 process 14) with tiles and slices
+#       meta.lucb      the facts a decoder gathers about one file
+#       dng.lucb       DNG: raw directory, levels, crop and color tags
+#       canon.lucb     Canon CR2
+#       nikon.lucb     Nikon NEF and its lossless Huffman coding
+#       sony.lucb      Sony ARW, ARW2 blocks and the SR2 white balance
+#       others.lucb    Olympus ORF, Panasonic RW2, Pentax PEF and Fujifilm RAF
+#       unpack.lucb    sensor samples out of the file into a 16-bit mosaic
+#       matrices.lucb  the table of camera color matrices for proprietary raws
+#       color.lucb     matrices, the DNG color model and temperature/tint
+#       levels.lucb    black and white levels, white balance and clipping to [0, 1]
+#       bilinear.lucb  the fast demosaic
+#       ahd.lucb       adaptive homogeneity-directed demosaic
+#       develop.lucb   tiles through demosaic, matrix and orientation into the Raster
+#       api.lucb       detect, probe, decode, info and white balance
+#       tests.lucb     unit tests on synthetic streams and truncation fuzzing
+#
+#==============================================================================================
+
+## Camera RAW decoding: DNG (uncompressed, lossless JPEG, Deflate; Bayer and
+## LinearRaw), Canon CR2, Nikon NEF, Sony ARW, Olympus ORF, Panasonic RW2,
+## Pentax PEF and Fujifilm RAF (Bayer). `probe` and `decode` fill a luce-raster
+## `Raster` with three float channels, R, G and B, in linear sRGB where the
+## sensor's white level after white balance is 1.0 (times the file's baseline
+## exposure). `info` and `white_balance` answer the as-shot white balance and
+## the multipliers for any temperature and tint.
+import memory
+import math
+import thread
+import os
+import binary
+import compress
+from binary import Reader
+from raster import Raster, SampleType
+from raster_errors import corrupt, unsupported, invalid, limit
+
+## How carefully to demosaic: `fast` is bilinear, `best` is AHD.
+pub enum Quality:
+    fast
+    best
+
+## A white balance, both as Temperature/Tint and as the multipliers that apply
+## it to camera values. Temperature is in kelvin; tint is in Adobe's units,
+## positive towards magenta. `multipliers` are the red, green and blue gains,
+## scaled so the smallest is one.
+pub struct WhiteBalance:
+    pub var temperature: f64
+    pub var tint: f64
+    pub var multipliers: f64[3]
+
+## How to develop a raw. A zero `temperature` keeps the as-shot white balance;
+## otherwise `temperature` and `tint` choose it. `exposure` applies the file's
+## baseline exposure; `crop` applies the camera's default crop; `camera` skips
+## the color matrix, leaving white-balanced camera RGB (for profiling); `threads`
+## zero means one per processor.
+pub struct Options:
+    pub var quality: Quality = .best
+    pub var temperature: f64 = 0.0
+    pub var tint: f64 = 0.0
+    pub var exposure: bool = true
+    pub var crop: bool = true
+    pub var camera: bool = false
+    pub var threads: usize = 0
+
+## What a raw file is: its format ("DNG", "CR2", "NEF", "ARW", "ORF", "RW2",
+## "PEF" or "RAF"), camera, sensor and developed sizes, the as-shot white
+## balance, the baseline exposure in stops, and where the color matrix came
+## from: "dng" (the file's own), "table" (this package's matrix table) or
+## "generic" (no matrix for this camera; an approximate sRGB-like fallback).
+## The strings view the file's bytes.
+pub struct Info:
+    pub var format: str
+    pub var make: str
+    pub var model: str
+    pub var raw_width: usize
+    pub var raw_height: usize
+    pub var width: usize
+    pub var height: usize
+    pub var bits: usize
+    pub var as_shot: WhiteBalance
+    pub var baseline_exposure: f64
+    pub var matrix: str
+    pub var orientation: u64

@@ -1,0 +1,250 @@
+#==============================================================================================
+#
+#   raw/dng - Adobe Digital Negative
+#
+#   DESCRIPTION:
+#       A DNG is a TIFF whose main image is the raw: in IFD0 or one of its SubIFDs,
+#       marked NewSubFileType 0 and photometric CFA or LinearRaw. The camera's color
+#       tags live in IFD0; the sensor's layout and levels live with the raw image.
+#       Tree gathers the directories every TIFF-based raw is searched through.
+#
+#==============================================================================================
+
+## The directories of a TIFF-based raw: the IFD0 chain, SubIFDs and EXIF.
+struct Tree:
+    var directories: (Directory?)[32]
+    var count: usize
+    var exif: Directory?
+
+    mutating func add(directory: Directory) -> !:
+        if self.count == self.directories.length:
+            error(limit, "raw file has too many TIFF directories")
+        for i in 0..<self.count:
+            if let known = self.directories[i]:
+                if known.offset == directory.offset:
+                    error(corrupt, "raw file has a cyclic TIFF directory")
+        self.directories[self.count] = directory
+        self.count += 1
+
+    ## Directory `index`, which `add` put there.
+    func at(index: usize) -> Directory!:
+        return self.directories[index] else error(invalid, "raw directory index out of range")
+
+    ## Every directory of the TIFF whose header is at `start`, offsets from `base`.
+    static func walk(file: const u8[], start: usize, base: usize) -> Tree!:
+        let (little, first) = try tiff_header(file, start)
+        var tree = Tree()
+        var offset = first + base
+        var chain: usize = 0
+        while offset != 0 and chain < 16:
+            let directory = try Directory.open(file, base, offset, little)
+            try tree.add(directory)
+            chain += 1
+            offset = try directory.next()
+        var index: usize = 0
+        while index < tree.count:
+            let directory = try tree.at(index)
+            index += 1
+            if let children = try directory.find(330):
+                for i in 0..<children.count:
+                    try tree.add(try directory.child(try children.uint(i)))
+            if tree.exif == none:
+                if let pointer = try directory.find(34665):
+                    tree.exif = try directory.child(try pointer.uint(0))
+        return tree
+
+    ## The first directory holding `tag`.
+    func holding(tag: u64) -> Directory?!:
+        for i in 0..<self.count:
+            let directory = try self.at(i)
+            if try directory.find(tag) != none:
+                return directory
+        return none
+
+## The color temperature of an EXIF light source code, as DNG calibrations use.
+func illuminant_temperature(code: u64) -> f64:
+    if code == 1 or code == 4 or code == 9 or code == 18 or code == 20: return 5500.0
+    if code == 2 or code == 14: return 4200.0
+    if code == 3 or code == 17: return 2850.0
+    if code == 10: return 6500.0
+    if code == 11: return 7500.0
+    if code == 12: return 6400.0
+    if code == 13: return 5000.0
+    if code == 15: return 3450.0
+    if code == 16: return 2940.0
+    if code == 19: return 6774.0
+    if code == 22: return 7504.0
+    if code == 23: return 5003.0
+    if code == 24: return 3200.0
+    return 6504.0
+
+## Read a 3×3 matrix tag into `out`; false when absent. Four-color matrices are
+## refused.
+func read_matrix(directory: const Directory*, tag: u64, out: f64[]) -> bool!:
+    let found = try directory.find(tag) else return false
+    if found.count != 9:
+        error(unsupported, "only three-color DNG matrices are supported")
+    for i: usize in 0..<9:
+        out[i] = try found.real(i)
+    return true
+
+## The DNG's raw directory: NewSubFileType 0, CFA or LinearRaw, the largest.
+func dng_raw(tree: const Tree*) -> Directory!:
+    var best: Directory? = none
+    var area: usize = 0
+    for i in 0..<tree.count:
+        let directory = try tree.at(i)
+        let photometric = try directory.uint(262)
+        if try directory.uint(254) != 0 or (photometric != 32803 and photometric != 34892):
+            continue
+        let size = (usize)(try directory.uint(256)) *| (usize)(try directory.uint(257))
+        if size > area:
+            area = size
+            best = directory
+    return best else error(corrupt, "DNG has no raw image")
+
+## Fill `meta` from a DNG.
+func parse_dng(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
+    let main = try tree.at(0)
+    meta.format = "DNG"
+    meta.make = try main.text(271)
+    meta.model = try main.text(272)
+    if meta.model.length == 0:
+        meta.model = try main.text(50708)
+    meta.orientation = try main.uint(274, 1)
+    try dng_color(meta, &main)
+    let raw = try dng_raw(tree)
+    meta.raw_width = (usize)(try raw.uint(256))
+    meta.raw_height = (usize)(try raw.uint(257))
+    meta.samples = (usize)(try raw.uint(277, 1))
+    meta.bits = (usize)(try raw.uint(258, 16))
+    meta.little = raw.little
+    meta.predictor = try raw.uint(317, 1)
+    meta.mosaic = try raw.uint(262) == 32803
+    if meta.bits < 1 or meta.bits > 16 or try raw.uint(339, 1) != 1:
+        error(unsupported, "floating-point and wider than 16-bit DNGs are not supported")
+    let compression = try raw.uint(259, 1)
+    meta.coding = Coding.unpacked if compression == 1 and (meta.bits == 8 or meta.bits == 16) else Coding.packed if compression == 1 else Coding.ljpeg if compression == 7 else Coding.deflate if compression == 8 else error(unsupported, "lossy or unknown DNG compression is not supported")
+    if let offsets = try raw.find(324):
+        meta.offsets = offsets
+        meta.counts = try raw.find(325) else error(corrupt, "DNG tiles lack byte counts")
+        meta.tile_width = (usize)(try raw.uint(322))
+        meta.tile_height = (usize)(try raw.uint(323))
+    else:
+        meta.offsets = try raw.find(273) else error(corrupt, "DNG raw has no strips or tiles")
+        meta.counts = try raw.find(279) else error(corrupt, "DNG strips lack byte counts")
+        meta.tile_width = meta.raw_width
+        meta.tile_height = (usize)(try raw.uint(278, (u64)meta.raw_height))
+        if meta.tile_height > meta.raw_height:
+            meta.tile_height = meta.raw_height
+    try dng_layout(meta, &raw)
+    try dng_levels(meta, &raw)
+
+## Active area, default crop and the color filter pattern.
+func dng_layout(meta: Meta*, raw: const Directory*) -> !:
+    if let area = try raw.find(50829):
+        if area.count != 4:
+            error(corrupt, "DNG active area needs four values")
+        let top = (usize)(try area.uint(0))
+        let left = (usize)(try area.uint(1))
+        let bottom = (usize)(try area.uint(2))
+        let right = (usize)(try area.uint(3))
+        if bottom <= top or right <= left:
+            error(corrupt, "DNG active area is empty")
+        meta.top = top
+        meta.left = left
+        meta.height = bottom - top
+        meta.width = right - left
+    if let origin = try raw.find(50719):
+        if let size = try raw.find(50720):
+            if origin.count == 2 and size.count == 2:
+                meta.crop_x = (usize)(try origin.real(0))
+                meta.crop_y = (usize)(try origin.real(1))
+                meta.crop_width = (usize)(try size.real(0))
+                meta.crop_height = (usize)(try size.real(1))
+    if meta.mosaic:
+        if meta.samples != 1:
+            error(unsupported, "DNG color filter data must have one sample")
+        let dims = try raw.find(33421) else error(corrupt, "DNG CFA lacks its repeat dimensions")
+        if dims.count != 2 or try dims.uint(0) != 2 or try dims.uint(1) != 2:
+            error(unsupported, "only 2×2 color filter arrays are supported")
+        let pattern = try raw.find(33422) else error(corrupt, "DNG CFA lacks its pattern")
+        if pattern.count != 4:
+            error(corrupt, "DNG CFA pattern has the wrong size")
+        var planes: u8[3] = [0, 1, 2]
+        if let colors = try raw.find(50710):
+            if colors.count != 3:
+                error(unsupported, "only three-color DNG filters are supported")
+            for i: usize in 0..<3:
+                planes[i] = (u8)(try colors.uint(i))
+        for i: usize in 0..<4:
+            let code = (u8)(try pattern.uint(i))
+            var plane: u8 = 255
+            for j: usize in 0..<3:
+                if planes[j] == code:
+                    plane = (u8)j
+            meta.cfa[i] = plane
+        if try raw.uint(50711, 1) != 1:
+            error(unsupported, "only rectangular DNG color filter layouts are supported")
+
+## Linearization table, black level pattern with its deltas, white level.
+func dng_levels(meta: Meta*, raw: const Directory*) -> !:
+    if let table = try raw.find(50712):
+        if table.count < 2 or table.count > 65536:
+            error(corrupt, "DNG linearization table has an invalid length")
+        meta.curve = try new u16[65536] in memory.heap
+        for i: usize in 0..<65536:
+            let value = try table.uint(i if i < table.count else table.count - 1)
+            meta.curve[i] = (u16)(value if value < 65536 else 65535)
+    if let dims = try raw.find(50713):
+        if dims.count == 2:
+            meta.black_rows = (usize)(try dims.uint(0))
+            meta.black_columns = (usize)(try dims.uint(1))
+    let samples = meta.samples
+    if meta.black_rows == 0 or meta.black_columns == 0 or meta.black_rows * meta.black_columns * samples > meta.black.length:
+        error(unsupported, "DNG black level pattern too large")
+    if let black = try raw.find(50714):
+        let needed = meta.black_rows * meta.black_columns * samples
+        for i in 0..<needed:
+            meta.black[i] = try black.real(i if i < black.count else black.count - 1)
+    if let deltas = try raw.find(50715):
+        meta.black_h = deltas
+    if let deltas = try raw.find(50716):
+        meta.black_v = deltas
+    if let white = try raw.find(50717):
+        for s in 0..<samples:
+            meta.white[s] = try white.real(s if s < white.count else white.count - 1)
+
+## The camera color tags of IFD0.
+func dng_color(meta: Meta*, main: const Directory*) -> !:
+    var profile = Profile(dng = true)
+    if try read_matrix(main, 50721, profile.color1):
+        profile.matrices = 1
+        profile.temperature1 = illuminant_temperature(try main.uint(50778, 21))
+        if try read_matrix(main, 50722, profile.color2):
+            profile.matrices = 2
+            profile.temperature2 = illuminant_temperature(try main.uint(50779, 21))
+    if profile.matrices > 0 and try read_matrix(main, 50964, profile.forward1):
+        profile.forwards = 1
+        if profile.matrices == 2 and try read_matrix(main, 50965, profile.forward2):
+            profile.forwards = 2
+    if try main.text(50931) == try main.text(50932):
+        discard(try read_matrix(main, 50723, profile.calibration1))
+        discard(try read_matrix(main, 50724, profile.calibration2))
+    if let balance = try main.find(50727):
+        if balance.count == 3:
+            for i: usize in 0..<3:
+                profile.analog[i] = try balance.real(i)
+    if let neutral = try main.find(50728):
+        if neutral.count == 3:
+            for i: usize in 0..<3:
+                meta.neutral[i] = try neutral.real(i)
+            meta.neutral_known = meta.neutral[0] > 0.0 and meta.neutral[1] > 0.0 and meta.neutral[2] > 0.0
+    if not meta.neutral_known:
+        if let xy = try main.find(50729):
+            if xy.count == 2:
+                meta.white_xy[0] = try xy.real(0)
+                meta.white_xy[1] = try xy.real(1)
+    meta.baseline_exposure = try main.real(50730) + try main.real(51109)
+    meta.profile = profile
+    meta.matrix = "dng" if profile.matrices > 0 else "generic"

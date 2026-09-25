@@ -1,0 +1,110 @@
+[
+ {
+  "name": "nikon_d800_12u.nef",
+  "url": "https://raw.pixls.us/getfile.php/759/nice/Nikon%20-%20D800%20-%2012bit%2012bit%20uncompressed%20(3:2).NEF",
+  "sha256": "e096d28a860f8b7afe3abde4ccc5cec5bcda229d137b4919cd821a2fc9bf87b2",
+  "camera": "Nikon D800"
+ },
+ {
+  "name": "sony_nex6.arw",
+  "url": "https://raw.pixls.us/getfile.php/782/nice/Sony%20-%20NEX-6%20-%2012bit%2012bit%20compressed%20(3:2).ARW",
+  "sha256": "bf4c6d21136aa4fd626212fe72b962b6404e3fca45cdc3b6afbed8e73fee2cf8",
+  "camera": "Sony NEX-6"
+ },
+ {
+  "name": "canon_6d.cr2",
+  "url": "https://raw.pixls.us/getfile.php/799/nice/Canon%20-%20EOS%206D%20-%20RAW.CR2",
+  "sha256": "360842779d08fe4805b4a2fe4979f06fdc6da982c85c3acb181f25bcf4c9f536",
+  "camera": "Canon EOS 6D"
+ },
+ {
+  "name": "nikon_d750_14l.nef",
+  "url": "https://raw.pixls.us/getfile.php/898/nice/Nikon%20-%20D750%20-%2014bit%2014bit%20compressed%20(Lossless)%20(3:2).NEF",
+  "sha256": "f90deb2819863f5a6ca9913c255fdd83a94963f4284eb88df9d389da7a6c7665",
+  "camera": "Nikon D750"
+ },
+ {
+  "name": "nikon_d7000_14l.nef",
+  "url": "https://raw.pixls.us/getfile.php/958/nice/Nikon%20-%20D7000%20-%2014bit%2014bit%20compressed%20(Lossless)%20(3:2).NEF",
+  "sha256": "639945753240005d80488c0462c01e73a7ab82c96d3d1cdb6661f02e1b3c1319",
+  "camera": "Nikon D7000"
+ },
+ {
+  "name": "sony_a7m2_14c.arw",
+  "url": "https://raw.pixls.us/getfile.php/967/nice/Sony%20-%20ILCE-7M2%20-%2014bit%2014bit%20compressed%20(3:2).arw",
+  "sha256": "891b098c6cad16f01af4cbbe229d89652008b0108ad343079a4fc688b320fa14",
+  "camera": "Sony ILCE-7M2"
+ },
+ {
+  "name": "adobe_5d3_ljpeg.dng",
+  "url": "https://raw.pixls.us/getfile.php/1024/nice/Adobe%20DNG%20Converter%20-%20Canon%20EOS%205D%20Mark%20III%20-%2016bit%2016bit%20Lossless%20JPEG%20compression%20(3:2).DNG",
+  "sha256": "3118116735d4f6dd01fd9d6a80ee9aac52a2c2debdc6dcd112bd5e3059044a55",
+  "camera": "Adobe DNG Converter Canon EOS 5D Mark III"
+ },
+ {
+  "name": "adobe_5d3_linear.dng",
+  "url": "https://raw.pixls.us/getfile.php/1032/nice/Adobe%20DNG%20Converter%20-%20Canon%20EOS%205D%20Mark%20III%20-%20Lossless%20JPEG%20compression,%20rgb%20(3:2).DNG",
+  "sha256": "0608c9f277307b745530e61b589c465540611df22f9a1fe2d01237c5b2b4c13b",
+  "camera": "Adobe DNG Converter Canon EOS 5D Mark III"
+ },
+ {
+  "name": "canon_5d2.cr2",
+  "url": "https://raw.pixls.us/getfile.php/1182/nice/Canon%20-%20EOS%205D%20Mark%20II%20-%20RAW%20(3:2).CR2",
+  "sha256": "81c5ee6da45c4e22584c5344807ac32e2c9ba82ad274486ba64745ef8dd4f69c",
+  "camera": "Canon EOS 5D Mark II"
+ },
+ {
+  "name": "fuji_xa1.raf",
+  "url": "https://raw.pixls.us/getfile.php/1214/nice/Fujifilm%20-%20X-A1%20-%2012bit%2012bit%20uncompressed%20(3:2).RAF",
+  "sha256": "b2ddb5fe31a3b976d12961c72a2689de8742739df3d8f757614eca65f8df2a61",
+  "camera": "Fujifilm X-A1"
+ },
+ {
+  "name": "olympus_em10.orf",
+  "url": "https://raw.pixls.us/getfile.php/1331/nice/Olympus%20-%20E-M10%20-%2016bit%20(4:3).ORF",
+  "sha256": "d7f6ac99ee1f824e81ec0e71599f0f87f9b2e2675f7ddfdb21202281b8bdc5e0",
+  "camera": "Olympus E-M10"
+ },
+ {
+  "name": "pentax_k5.pef",
+  "url": "https://raw.pixls.us/getfile.php/1480/nice/Pentax%20-%20K-5%20-%2014bit%20(3:2).PEF",
+  "sha256": "1fefefbccd73ba05c71f49b724e1f52bb343e2ac4f52f3bc93d828f5ee02cf6c",
+  "camera": "Pentax K-5"
+ },
+ {
+  "name": "panasonic_g7.rw2",
+  "url": "https://raw.pixls.us/getfile.php/1960/nice/Panasonic%20-%20DMC-G7%20-%203:2.RW2",
+  "sha256": "ee15126aabf8c530b7519638312deef7f0746972aa93fed662e924028d839969",
+  "camera": "Panasonic DMC-G7"
+ },
+ {
+  "name": "pentax_k50.dng",
+  "url": "https://raw.pixls.us/getfile.php/2235/nice/Pentax%20-%20K-50%20-%2012bit%20(3:2).DNG",
+  "sha256": "9ea1dc1f92df19699aa8b620670c64a84d4ead0172a49cbbd47dea9257d14e67",
+  "camera": "Pentax K-50"
+ },
+ {
+  "name": "leica_m240.dng",
+  "url": "https://raw.pixls.us/getfile.php/2317/nice/Leica%20-%20M%20(Typ%20240)%20-%2016bit%2016bit%20compressed%20(3:2).DNG",
+  "sha256": "bf35a4da121f853cb644253b69515b441748f95fcbd6fdea2de025a76e6c24cd",
+  "camera": "Leica M (Typ 240)"
+ },
+ {
+  "name": "sony_a7m3_14u.arw",
+  "url": "https://raw.pixls.us/getfile.php/2418/nice/Sony%20-%20ILCE-7M3%20-%2014bit%2014bit%20uncompressed%20(3:2).ARW",
+  "sha256": "ece80551abf64949dbe826985a80f1d9b265401ee4ea6b989e1829549616fdcd",
+  "camera": "Sony ILCE-7M3"
+ },
+ {
+  "name": "iphone8.dng",
+  "url": "https://raw.pixls.us/getfile.php/2835/nice/Apple%20-%20iPhone%208%20-%2016bit%20(4:3).dng",
+  "sha256": "75cc053e427c3ca2dfa8526dc6c9c77fdb265bc5d005af1fd408b5084250a9fc",
+  "camera": "Apple iPhone 8"
+ },
+ {
+  "name": "pixel4a.dng",
+  "url": "https://raw.pixls.us/getfile.php/4176/nice/Google%20-%20Pixel%204a%20-%2016bit%20(4:3).dng",
+  "sha256": "11b38186ee3455376291bcdb3049728a3f9dcd94b9e82ff76855d9f3430e44be",
+  "camera": "Google Pixel 4a"
+ }
+]

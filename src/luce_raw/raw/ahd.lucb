@@ -1,0 +1,192 @@
+#==============================================================================================
+#
+#   raw/ahd - Adaptive homogeneity-directed demosaicing
+#
+#   DESCRIPTION:
+#       Hirakawa and Parks' AHD as dcraw and LibRaw implement it, in the same integer
+#       arithmetic so results agree with them: green is interpolated once
+#       horizontally and once vertically, red and blue follow each green, both
+#       candidates go to CIELAB, and each pixel takes the direction whose 3×3
+#       neighbourhood is more homogeneous in lightness and chroma. Work is per tile;
+#       a tile reads up to five pixels beyond its rectangle, so the five-pixel border
+#       of the image is filled by averaging neighbours instead (border.lucb).
+#
+#==============================================================================================
+
+## CIELAB in dcraw's integer scale (64 per unit) from 16-bit camera RGB: XYZ in
+## 16.16 fixed point, then tables of the cube-root response already scaled
+## for L*, a* and b*, so no pixel needs a float conversion.
+struct LabTable:
+    var lightness: i32[]
+    var red_green: i32[]
+    var blue_yellow: i32[]
+    var to_xyz: i64[9]
+
+    static func create(to_xyz: f64[9]) -> LabTable!:
+        var table = LabTable()
+        errdefer table.close()
+        table.lightness = try new i32[65536] in memory.heap
+        table.red_green = try new i32[65536] in memory.heap
+        table.blue_yellow = try new i32[65536] in memory.heap
+        for i in 0..<table.lightness.length:
+            let r = (f64)i / 65535.0
+            let f = math.cbrt(r) if r > 0.008856 else 7.787 * r + 16.0 / 116.0
+            table.lightness[i] = (i32)(64.0 * (116.0 * f - 16.0))
+            table.red_green[i] = (i32)math.round(64.0 * 500.0 * f)
+            table.blue_yellow[i] = (i32)math.round(64.0 * 200.0 * f)
+        for i: usize in 0..<9:
+            table.to_xyz[i] = (i64)math.round(math.clamp(to_xyz[i], -1000.0, 1000.0) * 65536.0)
+        return table
+
+    ## CIELAB of a 16-bit camera RGB into `out`.
+    func lab(r: u16, g: u16, b: u16, out: i32[]):
+        let m = self.to_xyz
+        let x = clip16((m[0] * (i64)r + m[1] * (i64)g + m[2] * (i64)b + 32768) >> 16)
+        let y = clip16((m[3] * (i64)r + m[4] * (i64)g + m[5] * (i64)b + 32768) >> 16)
+        let z = clip16((m[6] * (i64)r + m[7] * (i64)g + m[8] * (i64)b + 32768) >> 16)
+        out[0] = self.lightness[y]
+        out[1] = self.red_green[x] - self.red_green[y]
+        out[2] = self.blue_yellow[y] - self.blue_yellow[z]
+
+    mutating func close():
+        if self.lightness.length > 0:
+            free(self.lightness) in memory.heap
+        if self.red_green.length > 0:
+            free(self.red_green) in memory.heap
+        if self.blue_yellow.length > 0:
+            free(self.blue_yellow) in memory.heap
+        self = LabTable()
+
+## An index clamped to 16-bit sample range.
+func clip16(value: i64) -> usize:
+    return 0 if value < 0 else 65535 if value > 65535 else (usize)value
+
+## `value` limited to the range its two neighbours span.
+func between(value: i64, a: i64, b: i64) -> i64:
+    let low = a if a < b else b
+    let high = b if a < b else a
+    return low if value < low else high if value > high else value
+
+## Scratch for one tile: two directions of RGB, Lab and homogeneity over the
+## tile and a three-pixel apron.
+struct AhdScratch:
+    var rgb: u16[]
+    var lab: i32[]
+    var homogeneity: u8[]
+    var capacity: usize
+
+    static func create(tile: usize) -> AhdScratch!:
+        let size = (tile + 6) * (tile + 6)
+        var scratch = AhdScratch(capacity = size)
+        errdefer scratch.close()
+        scratch.rgb = try new u16[size * 6] in memory.heap
+        scratch.lab = try new i32[size * 6] in memory.heap
+        scratch.homogeneity = try new u8[size * 2] in memory.heap
+        return scratch
+
+    mutating func close():
+        if self.rgb.length > 0:
+            free(self.rgb) in memory.heap
+        if self.lab.length > 0:
+            free(self.lab) in memory.heap
+        if self.homogeneity.length > 0:
+            free(self.homogeneity) in memory.heap
+        self = AhdScratch()
+
+## AHD for the rectangle [x0, x1) × [y0, y1), which must lie at least five
+## pixels inside the plane; results go to `out` as RGB rows of `out_stride`
+## pixels starting at (`ox`, `oy`) of `out`'s frame.
+func ahd_tile(plane: const Plane*, table: const LabTable*, scratch: AhdScratch*, x0: usize, y0: usize, x1: usize, y1: usize, out: u16[], out_stride: usize, ox: usize, oy: usize):
+    let w = plane.width
+    let p = plane.data
+    let tw = x1 - x0 + 6
+    let th = y1 - y0 + 6
+    let size = tw * th
+    let bx = x0 - 3
+    let by = y0 - 3
+    # Green, horizontally (direction 0) and vertically (direction 1).
+    for ty in 0..<th:
+        let y = by + ty
+        for tx in 0..<tw:
+            let x = bx + tx
+            let at = ty * tw + tx
+            let i = y * w + x
+            let c = (usize)plane.cfa[(y & 1) * 2 + (x & 1)]
+            let v = p[i]
+            for d: usize in 0..<2:
+                let o = (d * size + at) * 3
+                scratch.rgb[o] = 0
+                scratch.rgb[o + 1] = 0
+                scratch.rgb[o + 2] = 0
+                scratch.rgb[o + c] = v
+            if c != 1:
+                let h = (((i64)p[i - 1] + (i64)v + (i64)p[i + 1]) * 2 - (i64)p[i - 2] - (i64)p[i + 2]) >> 2
+                scratch.rgb[at * 3 + 1] = (u16)between(h, (i64)p[i - 1], (i64)p[i + 1])
+                let u = (((i64)p[i - w] + (i64)v + (i64)p[i + w]) * 2 - (i64)p[i - 2 * w] - (i64)p[i + 2 * w]) >> 2
+                scratch.rgb[(size + at) * 3 + 1] = (u16)between(u, (i64)p[i - w], (i64)p[i + w])
+    # Red and blue from each direction's green, then CIELAB.
+    var lab: i32[3]
+    for d: usize in 0..<2:
+        let rgb = scratch.rgb[d * size * 3..<(d + 1) * size * 3]
+        for ty in 1..<th - 1:
+            let y = by + ty
+            for tx in 1..<tw - 1:
+                let x = bx + tx
+                let at = ty * tw + tx
+                let i = y * w + x
+                var c = 2 - (usize)plane.cfa[(y & 1) * 2 + (x & 1)]
+                var value: i64 = 0
+                if c == 1:
+                    c = (usize)plane.cfa[((y + 1) & 1) * 2 + (x & 1)]
+                    let g = (i64)p[i]
+                    value = g + (((i64)p[i - 1] + (i64)p[i + 1] - (i64)rgb[(at - 1) * 3 + 1] - (i64)rgb[(at + 1) * 3 + 1]) >> 1)
+                    rgb[at * 3 + 2 - c] = (u16)clip16(value)
+                    value = g + (((i64)p[i - w] + (i64)p[i + w] - (i64)rgb[(at - tw) * 3 + 1] - (i64)rgb[(at + tw) * 3 + 1]) >> 1)
+                else:
+                    let corners = (i64)p[i - w - 1] + (i64)p[i - w + 1] + (i64)p[i + w - 1] + (i64)p[i + w + 1]
+                    let greens = (i64)rgb[(at - tw - 1) * 3 + 1] + (i64)rgb[(at - tw + 1) * 3 + 1] + (i64)rgb[(at + tw - 1) * 3 + 1] + (i64)rgb[(at + tw + 1) * 3 + 1]
+                    value = (i64)rgb[at * 3 + 1] + ((corners - greens + 1) >> 2)
+                rgb[at * 3 + c] = (u16)clip16(value)
+                table.lab(rgb[at * 3], rgb[at * 3 + 1], rgb[at * 3 + 2], lab)
+                let o = (d * size + at) * 3
+                scratch.lab[o] = lab[0]
+                scratch.lab[o + 1] = lab[1]
+                scratch.lab[o + 2] = lab[2]
+    # Homogeneity: neighbours within the tighter direction's tolerance.
+    let steps: isize[4] = [-1, 1, -(isize)tw, (isize)tw]
+    var ldiff: i64[8]
+    var abdiff: i64[8]
+    for ty in 2..<th - 2:
+        for tx in 2..<tw - 2:
+            let at = ty * tw + tx
+            for d: usize in 0..<2:
+                let o = (d * size + at) * 3
+                for k: usize in 0..<4:
+                    let n = (usize)((isize)o + steps[k] * 3)
+                    let dl = (i64)scratch.lab[o] - (i64)scratch.lab[n]
+                    let da = (i64)scratch.lab[o + 1] - (i64)scratch.lab[n + 1]
+                    let db = (i64)scratch.lab[o + 2] - (i64)scratch.lab[n + 2]
+                    ldiff[d * 4 + k] = dl if dl >= 0 else -dl
+                    abdiff[d * 4 + k] = da * da + db * db
+            let leps = math.imin(math.imax(ldiff[0], ldiff[1]), math.imax(ldiff[6], ldiff[7]))
+            let abeps = math.imin(math.imax(abdiff[0], abdiff[1]), math.imax(abdiff[6], abdiff[7]))
+            for d: usize in 0..<2:
+                var count: u8 = 0
+                for k: usize in 0..<4:
+                    if ldiff[d * 4 + k] <= leps and abdiff[d * 4 + k] <= abeps:
+                        count += 1
+                scratch.homogeneity[d * size + at] = count
+    # Each pixel takes the more homogeneous direction, or the mean of both.
+    for ty in 3..<th - 3:
+        for tx in 3..<tw - 3:
+            var sums: u32[2]
+            for d: usize in 0..<2:
+                for yy in ty - 1..=ty + 1:
+                    for xx in tx - 1..=tx + 1:
+                        sums[d] += (u32)scratch.homogeneity[d * size + yy * tw + xx]
+            let at = ty * tw + tx
+            let target = ((oy + ty - 3) * out_stride + ox + tx - 3) * 3
+            for c: usize in 0..<3:
+                let h = (u32)scratch.rgb[at * 3 + c]
+                let v = (u32)scratch.rgb[(size + at) * 3 + c]
+                out[target + c] = (u16)(h if sums[0] > sums[1] else v if sums[1] > sums[0] else (h + v) >> 1)

@@ -1,0 +1,159 @@
+#==============================================================================================
+#
+#   raw/profile - From a camera's color facts to a Development
+#
+#   DESCRIPTION:
+#       Development holds what the pixel stages apply for one white balance. For a
+#       DNG it evaluates the camera profile as Adobe's DNG SDK does: normalized color
+#       and forward matrices, interpolated for the white's temperature, a camera
+#       neutral found iteratively from the white or the white from the neutral, and
+#       the camera-to-XYZ-D50 transform. Other cameras use their single D65 matrix.
+#
+#==============================================================================================
+
+## What the pixel stages apply for one white balance: `multipliers` on camera
+## values (the smallest is one), then `to_rgb` from the balanced values to linear
+## sRGB, where balanced white (1, 1, 1) is sRGB white. `to_xyz` is the same to
+## XYZ relative to D65's white, for demosaicing in Lab.
+struct Development:
+    var balance: WhiteBalance
+    var multipliers: f64[3]
+    var to_rgb: f64[9]
+    var to_xyz: f64[9]
+
+## The DNG SDK's color matrix normalization: D50 maps to at most one.
+func normalize_color(m: f64[9]) -> f64[9]:
+    let coordinate = apply(m, xy_to_xyz(d50_xy))
+    let largest = math.max(coordinate[0], math.max(coordinate[1], coordinate[2]))
+    if largest > 0.0 and (largest < 0.99 or largest > 1.01):
+        var out = m
+        for i: usize in 0..<9:
+            out[i] /= largest
+        return out
+    return m
+
+## The DNG SDK's forward matrix normalization: camera (1, 1, 1) maps to D50.
+func normalize_forward(m: f64[9]) -> f64[9]:
+    let xyz = apply(m, [1.0, 1.0, 1.0])
+    let d50 = xy_to_xyz(d50_xy)
+    var out = m
+    for i: usize in 0..<9:
+        out[i] = m[i] * d50[i // 3] / xyz[i // 3] if xyz[i // 3] != 0.0 else m[i]
+    return out
+
+## The weight of the first calibration for white `xy`: one at or below the
+## cooler illuminant, zero at or above the warmer, linear in 1/T between.
+func weight(profile: const Profile*, xy: f64[2]) -> f64:
+    if profile.matrices < 2:
+        return 1.0
+    let (temperature, _tint) = temperature_of(xy)
+    let t1 = math.min(profile.temperature1, profile.temperature2)
+    let t2 = math.max(profile.temperature1, profile.temperature2)
+    if t1 >= t2:
+        return 1.0
+    let g = 1.0 if temperature <= t1 else 0.0 if temperature >= t2 else (1.0 / temperature - 1.0 / t2) / (1.0 / t1 - 1.0 / t2)
+    return 1.0 - g if profile.temperature1 > profile.temperature2 else g
+
+## The profile's XYZ-to-camera matrix for white `xy`, with analog balance and
+## calibration, and its forward matrix (all zero without one).
+func camera_matrices(profile: const Profile*, xy: f64[2]) -> (f64[9], f64[9]):
+    let g = weight(profile, xy)
+    let color = blend(normalize_color(profile.color1), normalize_color(profile.color2), g) if profile.matrices == 2 else normalize_color(profile.color1)
+    let calibration = blend(profile.calibration1, profile.calibration2, g) if profile.matrices == 2 else profile.calibration1
+    var forward: f64[9]
+    if profile.forwards == 2:
+        forward = blend(normalize_forward(profile.forward1), normalize_forward(profile.forward2), g)
+    elif profile.forwards == 1:
+        forward = normalize_forward(profile.forward1)
+    return (multiply(diagonal(profile.analog), multiply(calibration, color)), forward)
+
+## The white a camera neutral stands for, found by iterating the
+## temperature-dependent matrix as the DNG SDK does.
+func neutral_white(profile: const Profile*, neutral: f64[3]) -> f64[2]!:
+    var last = d50_xy
+    for pass: usize in 0..<30:
+        let (to_camera, _forward) = camera_matrices(profile, last)
+        var next = xyz_to_xy(apply(try invert(to_camera), neutral))
+        if math.abs(next[0] - last[0]) + math.abs(next[1] - last[1]) < 0.0000001:
+            return next
+        if pass == 29:
+            next = [(last[0] + next[0]) * 0.5, (last[1] + next[1]) * 0.5]
+        last = next
+    return last
+
+## The camera neutral of white `xy`, largest entry one.
+func white_neutral(profile: const Profile*, xy: f64[2]) -> f64[3]:
+    let (to_camera, _forward) = camera_matrices(profile, xy)
+    let white = apply(to_camera, xy_to_xyz(xy))
+    let largest = math.max(white[0], math.max(white[1], white[2]))
+    var out: f64[3]
+    for i: usize in 0..<3:
+        out[i] = math.clamp(white[i] / largest, 0.001, 1.0) if largest > 0.0 else 1.0
+    return out
+
+## The Development for `meta` at the as-shot white balance (`temperature` zero)
+## or at `temperature` and `tint`.
+func development(meta: const Meta*, temperature: f64, tint: f64) -> Development!:
+    let profile = &meta.profile
+    var xy = d50_xy
+    var neutral: f64[3] = [1.0, 1.0, 1.0]
+    if temperature > 0.0:
+        xy = white_of(temperature, tint)
+        neutral = white_neutral(profile, xy)
+    elif meta.neutral_known:
+        let largest = math.max(meta.neutral[0], math.max(meta.neutral[1], meta.neutral[2]))
+        for i: usize in 0..<3:
+            neutral[i] = meta.neutral[i] / largest
+        xy = try neutral_white(profile, neutral)
+    else:
+        xy = meta.white_xy if meta.white_xy[1] > 0.0 else d50_xy if profile.dng else d65_xy
+        neutral = white_neutral(profile, xy)
+    var result = Development()
+    for i: usize in 0..<3:
+        result.multipliers[i] = 1.0 / math.max(neutral[i], 0.001)
+    let smallest = math.min(result.multipliers[0], math.min(result.multipliers[1], result.multipliers[2]))
+    for i: usize in 0..<3:
+        result.multipliers[i] /= smallest
+    let (kelvin, green) = temperature_of(xy)
+    result.balance = WhiteBalance(temperature = kelvin, tint = green, multipliers = result.multipliers)
+    if profile.dng:
+        let (to_camera, forward) = camera_matrices(profile, xy)
+        var to_pcs: f64[9]
+        if profile.forwards > 0:
+            let individual = try invert(multiply(diagonal(profile.analog), camera_calibration(profile, xy)))
+            let reference = apply(individual, neutral)
+            to_pcs = multiply(forward, multiply(try invert(diagonal(reference)), individual))
+        else:
+            var pcs_to_camera = multiply(to_camera, try adaptation(d50_xy, xy))
+            let reach = apply(pcs_to_camera, xy_to_xyz(d50_xy))
+            let scale = math.max(reach[0], math.max(reach[1], reach[2]))
+            for i: usize in 0..<9:
+                pcs_to_camera[i] /= scale
+            to_pcs = try invert(pcs_to_camera)
+        # Balanced values are camera values over the neutral, largest one.
+        let largest = math.max(neutral[0], math.max(neutral[1], neutral[2]))
+        let balanced = diagonal([neutral[0] / largest, neutral[1] / largest, neutral[2] / largest])
+        result.to_rgb = multiply(try srgb_from_d50(), multiply(to_pcs, balanced))
+    else:
+        # dcraw's cam_xyz_coeff: camera from sRGB, rows normalized, inverted.
+        var from_rgb = multiply(profile.color1, xyz_from_srgb)
+        for i: usize in 0..<3:
+            let total = from_rgb[i * 3] + from_rgb[i * 3 + 1] + from_rgb[i * 3 + 2]
+            for j: usize in 0..<3:
+                from_rgb[i * 3 + j] /= total
+        result.to_rgb = try invert(from_rgb)
+    result.to_xyz = rgb_to_xyz(result.to_rgb)
+    return result
+
+## XYZ relative to D65's white from balanced camera values, given their sRGB
+## matrix: what AHD compares pixels in.
+func rgb_to_xyz(to_rgb: f64[9]) -> f64[9]:
+    let d65 = xy_to_xyz(d65_xy)
+    var out = multiply(xyz_from_srgb, to_rgb)
+    for i: usize in 0..<9:
+        out[i] /= d65[i // 3]
+    return out
+
+## The calibration matrix interpolated for white `xy`.
+func camera_calibration(profile: const Profile*, xy: f64[2]) -> f64[9]:
+    return blend(profile.calibration1, profile.calibration2, weight(profile, xy)) if profile.matrices == 2 else profile.calibration1

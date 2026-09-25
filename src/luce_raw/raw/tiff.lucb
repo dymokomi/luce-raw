@@ -1,0 +1,166 @@
+#==============================================================================================
+#
+#   raw/tiff - TIFF directories and their entries
+#
+#   DESCRIPTION:
+#       Raw formats are TIFF, or TIFF inside a wrapper, and keep their maker notes as
+#       further directories whose offsets count from some base: the file, the maker
+#       note, or a TIFF header inside it. A Directory knows its bytes, base and byte
+#       order; an Entry is one tag's values, read as integers or reals. Nothing here
+#       trusts an offset: every one is checked against the file.
+#
+#==============================================================================================
+
+## Bytes per value of each TIFF field type; zero marks an unknown type.
+let type_widths: usize[19] = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4, 0, 0, 8, 8, 8]
+
+## One tag's values in the file.
+struct Entry:
+    var tag: u64
+    var kind: u64
+    var count: usize
+    var data: const u8[]
+    var little: bool
+    var position: usize
+
+    ## Value `index` as an unsigned integer; signed types are sign-extended and
+    ## reals truncated.
+    func uint(index: usize) -> u64!:
+        if index >= self.count:
+            error(corrupt, "TIFF value index out of range")
+        let width = type_widths[(usize)self.kind]
+        var reader = Reader(data = self.data, position = index * width, little = self.little)
+        if self.kind == 5 or self.kind == 10 or self.kind == 11 or self.kind == 12:
+            let value = try self.real(index)
+            return (u64)value if value > 0.0 else 0
+        let value = try reader.uint(width)
+        if self.kind == 6 or self.kind == 8 or self.kind == 9:
+            let shift = 64 - width * 8
+            return (u64)((i64)(value << shift) >> shift)
+        return value
+
+    ## Value `index` as a real: rationals divide, floats convert, integers widen.
+    func real(index: usize) -> f64!:
+        if index >= self.count:
+            error(corrupt, "TIFF value index out of range")
+        let width = type_widths[(usize)self.kind]
+        var reader = Reader(data = self.data, position = index * width, little = self.little)
+        if self.kind == 5 or self.kind == 10:
+            let top = try reader.uint(4)
+            let bottom = try reader.uint(4)
+            if bottom == 0:
+                return 0.0
+            if self.kind == 10:
+                return (f64)(i32)(u32)top / (f64)(i32)(u32)bottom
+            return (f64)top / (f64)bottom
+        if self.kind == 11:
+            return binary.float_value((u32)(try reader.uint(4)))
+        if self.kind == 12:
+            return binary.double_value(try reader.uint(8))
+        let value = try reader.uint(width)
+        if self.kind == 6 or self.kind == 8 or self.kind == 9:
+            let shift = 64 - width * 8
+            return (f64)((i64)(value << shift) >> shift)
+        return (f64)value
+
+    ## The values as text up to the first NUL, trailing spaces dropped.
+    func text() -> str:
+        var end: usize = 0
+        while end < self.data.length and self.data[end] != 0:
+            end += 1
+        while end > 0 and self.data[end - 1] == ' ':
+            end -= 1
+        for i in 0..<end:
+            if self.data[i] >= 128:
+                return ""
+        return (str)self.data[..<end]
+
+## One directory: `count` twelve-byte (or twenty-byte, BigTIFF-free here)
+## entries at `offset`, value offsets counted from `base`.
+struct Directory:
+    var file: const u8[]
+    var base: usize
+    var offset: usize
+    var count: usize
+    var little: bool = true
+
+    ## The directory at `offset` of `file`, checked to lie inside it.
+    static func open(file: const u8[], base: usize, offset: usize, little: bool) -> Directory!:
+        var reader = Reader(data = file, position = offset, little = little)
+        let count = (usize)(try reader.uint(2))
+        if count == 0 or count > 4096:
+            error(corrupt, "TIFF directory has no or too many entries")
+        discard(try reader.take(count * 12 + 4))
+        return Directory(file = file, base = base, offset = offset, count = count, little = little)
+
+    ## Entry `index`, its values located and bounds-checked.
+    func entry(index: usize) -> Entry!:
+        var reader = Reader(data = self.file, position = self.offset + 2 + index * 12, little = self.little)
+        let tag = try reader.uint(2)
+        let kind = try reader.uint(2)
+        let count = try reader.uint(4)
+        if kind >= 19 or type_widths[(usize)kind] == 0:
+            error(corrupt, "unknown TIFF field type")
+        let bytes = count *? (u64)type_widths[(usize)kind] else error(corrupt, "TIFF field extent overflows")
+        let here = reader.position
+        let inline = try reader.take(4)
+        if bytes <= 4:
+            return Entry(tag = tag, kind = kind, count = (usize)count, data = inline[..<(usize)bytes], little = self.little, position = here)
+        var pointer = Reader(data = inline, little = self.little)
+        let at = (u64)self.base + try pointer.uint(4)
+        return Entry(tag = tag, kind = kind, count = (usize)count, data = try binary.slice(self.file, at, bytes), little = self.little, position = (usize)at)
+
+    ## The tag's entry, or none when the directory lacks it.
+    func find(tag: u64) -> Entry?!:
+        for i in 0..<self.count:
+            var reader = Reader(data = self.file, position = self.offset + 2 + i * 12, little = self.little)
+            if try reader.uint(2) == tag:
+                return try self.entry(i)
+        return none
+
+    ## The tag's first value, or `fallback` when absent.
+    func uint(tag: u64, fallback: u64 = 0) -> u64!:
+        if let found = try self.find(tag):
+            if found.count > 0:
+                return try found.uint(0)
+        return fallback
+
+    ## The tag's first value as a real, or `fallback` when absent.
+    func real(tag: u64, fallback: f64 = 0.0) -> f64!:
+        if let found = try self.find(tag):
+            if found.count > 0:
+                return try found.real(0)
+        return fallback
+
+    ## The tag's text, or empty when absent.
+    func text(tag: u64) -> str!:
+        if let found = try self.find(tag):
+            return found.text()
+        return ""
+
+    ## The absolute offset of the next directory in the chain, zero at its end.
+    func next() -> usize!:
+        var reader = Reader(data = self.file, position = self.offset + 2 + self.count * 12, little = self.little)
+        let link = try reader.uint(4)
+        return 0 if link == 0 else (usize)link + self.base
+
+    ## A directory an entry of this one points to, such as the EXIF directory or
+    ## a SubIFD; its offsets share this directory's base.
+    func child(offset: u64) -> Directory!:
+        let at = (u64)self.base + offset
+        if at >= (u64)self.file.length:
+            error(corrupt, "TIFF child directory outside file")
+        return try Directory.open(self.file, self.base, (usize)at, self.little)
+
+## A TIFF header's byte order and first directory offset, at `start` of `file`.
+func tiff_header(file: const u8[], start: usize) -> (bool, usize)!:
+    var reader = Reader(data = file, position = start)
+    let order = try reader.take(2)
+    let little = order[0] == 'I' and order[1] == 'I'
+    if not little and not (order[0] == 'M' and order[1] == 'M'):
+        error(corrupt, "invalid TIFF byte order")
+    reader.little = little
+    let magic = try reader.uint(2)
+    if magic != 42 and magic != 0x4f52 and magic != 0x5352 and magic != 0x55:
+        error(unsupported, "not a classic TIFF raw")
+    return (little, (usize)(try reader.uint(4)))

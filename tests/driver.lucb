@@ -1,0 +1,102 @@
+## The test driver tests/run.py builds: it decodes a raw with this package and
+## writes what it found for the Python checks to compare with LibRaw.
+##   driver info FILE
+##   driver sensor FILE OUT          u16 samples, then a text header OUT.txt
+##   driver develop FILE OUT QUALITY CROP EXPOSURE [SPACE [TEMPERATURE TINT]]
+##                                   f32 RGB rows, then OUT.txt with the size
+##   driver bench FILE REPEAT        milliseconds per decode
+import c
+import files
+import memory
+import strings
+import time
+import raw
+from raster import Raster
+from binary import Buffer
+
+func number(text: str) -> f64:
+    var value = 0.0
+    var scale = 0.0
+    var negative = false
+    for ch in text:
+        if ch == '-':
+            negative = true
+        elif ch == '.':
+            scale = 1.0
+        elif ch >= '0' and ch <= '9':
+            value = value * 10.0 + (f64)((u32)ch - 48)
+            if scale > 0.0:
+                scale *= 10.0
+    let result = value / scale if scale > 0.0 else value
+    return -result if negative else result
+
+func text_file(path: str, body: fmt) -> !:
+    var buffer: u8[4096]
+    let text = try format(buffer, body)
+    var name: u8[1024]
+    let where = try format(name, f"{path}.txt")
+    try files.write((c.str)where, text.bytes)
+
+pub func main(arguments: str[]) -> i32!:
+    let command = arguments[1]
+    let data = try files.read((c.str)arguments[2])
+    defer free(data)
+    if command == "info":
+        let about = try raw.info(data)
+        let wb = about.as_shot
+        print(f"{about.format} {about.make} | {about.model} raw {about.raw_width}x{about.raw_height} out {about.width}x{about.height} bits {about.bits} matrix {about.matrix} exposure {about.baseline_exposure} orientation {about.orientation} temperature {wb.temperature} tint {wb.tint} multipliers {wb.multipliers[0]} {wb.multipliers[1]} {wb.multipliers[2]}\n")
+        return 0
+    if command == "sensor":
+        var found = try raw.sensor(data)
+        defer found.close()
+        let bytes = u8[]((u8*)found.samples.data, found.samples.length * 2)
+        try files.write((c.str)arguments[3], bytes)
+        try text_file(arguments[3], f"{found.width} {found.height} {found.channels} {found.top} {found.left} {found.active_width} {found.active_height} {found.cfa[0]} {found.cfa[1]} {found.cfa[2]} {found.cfa[3]} {found.black[0]} {found.black[1]} {found.black[2]} {found.black[3]} {found.white}\n")
+        return 0
+    var options = raw.Options()
+    if command == "develop" or command == "bench":
+        if arguments.length > 4:
+            options.quality = raw.Quality.fast if arguments[4] == "fast" else raw.Quality.best
+        if arguments.length > 5:
+            options.crop = arguments[5] == "1"
+        if arguments.length > 6:
+            options.exposure = arguments[6] == "1"
+        if arguments.length > 7:
+            options.camera = arguments[7] == "camera"
+        if arguments.length > 9:
+            options.temperature = number(arguments[8])
+            options.tint = number(arguments[9])
+    if command == "develop":
+        var image = Raster()
+        defer image.close()
+        with memory.heap:
+            image.encoded = try alloc u8[data.length]
+        memory.copy(image.encoded, data, data.length)
+        try raw.probe(&image, options)
+        try raw.decode(&image, options)
+        let floats = try new f32[image.pixels.length]
+        defer free(floats)
+        for i in 0..<floats.length:
+            floats[i] = (f32)image.pixels[i]
+        try files.write((c.str)arguments[3], u8[]((u8*)floats.data, floats.length * 4))
+        try text_file(arguments[3], f"{image.width} {image.height}\n")
+        return 0
+    if command == "bench":
+        let repeat = (usize)number(arguments[3])
+        var best: u64 = 0
+        for i in 0..<repeat:
+            var image = Raster()
+            defer image.close()
+            with memory.heap:
+                image.encoded = try alloc u8[data.length]
+            memory.copy(image.encoded, data, data.length)
+            let start = time.now()
+            try raw.probe(&image, options)
+            try raw.decode(&image, options)
+            let spent = time.now() - start
+            if best == 0 or spent < best:
+                best = spent
+        print(f"{best // 1000000} ms\n")
+        return 0
+    print("unknown command\n")
+    return 2

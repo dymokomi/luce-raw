@@ -1,0 +1,141 @@
+#==============================================================================================
+#
+#   raw/ljpeg - Lossless JPEG, ITU T.81 process 14
+#
+#   DESCRIPTION:
+#       DNG tiles, Canon CR2 slices and many other raws are lossless JPEG: a frame
+#       (SOF3) of up to four interleaved components, Huffman-coded differences from
+#       one of seven predictors, and optional restart intervals. LosslessJpeg parses
+#       the markers and yields one decoded line of interleaved samples at a time;
+#       callers lay those samples into the mosaic as their format arranges them.
+#
+#==============================================================================================
+
+## A lossless JPEG stream being decoded line by line.
+struct LosslessJpeg:
+    var width: usize
+    var height: usize
+    var components: usize
+    var precision: u32
+    var predictor: u32
+    var restart: usize
+    var tables: Huffman[4]
+    var selectors: usize[4]
+    var reader: Bits
+    var lines: u16[]
+    var line: usize
+
+    ## Parse the markers up to the scan and prepare to decode its lines.
+    static func open(data: const u8[]) -> LosslessJpeg!:
+        var jpeg = LosslessJpeg()
+        errdefer jpeg.close()
+        var reader = Reader(data = data, little = false)
+        if try reader.uint(2) != 0xffd8:
+            error(corrupt, "lossless JPEG lacks its start marker")
+        var identifiers: u8[4]
+        var scanned = false
+        while not scanned:
+            var code = try reader.byte()
+            if code != 255:
+                error(corrupt, "lossless JPEG marker expected")
+            code = try reader.byte()
+            while code == 255:
+                code = try reader.byte()
+            let length = (usize)(try reader.uint(2))
+            if length < 2:
+                error(corrupt, "lossless JPEG segment too short")
+            var segment = Reader(data = try reader.take(length - 2), little = false)
+            if code == 0xc3:
+                jpeg.precision = (u32)(try segment.byte())
+                jpeg.height = (usize)(try segment.uint(2))
+                jpeg.width = (usize)(try segment.uint(2))
+                jpeg.components = (usize)(try segment.byte())
+                if jpeg.components < 1 or jpeg.components > 4 or jpeg.precision < 2 or jpeg.precision > 16 or jpeg.width == 0 or jpeg.height == 0:
+                    error(corrupt, "invalid lossless JPEG frame")
+                for c in 0..<jpeg.components:
+                    identifiers[c] = try segment.byte()
+                    if try segment.byte() != 0x11:
+                        error(unsupported, "subsampled lossless JPEG (sRAW) is not supported")
+                    discard(try segment.byte())
+            elif code == 0xc0 or code == 0xc1 or code == 0xc2 or (code >= 0xc5 and code <= 0xcf and code != 0xc8 and code != 0xcc):
+                error(unsupported, "only lossless (process 14) JPEG raws are supported")
+            elif code == 0xc4:
+                while segment.position < segment.data.length:
+                    let target = (usize)(try segment.byte())
+                    if (target >> 4) != 0 or (target & 15) > 3:
+                        error(corrupt, "invalid lossless JPEG Huffman table")
+                    let counts = try segment.take(16)
+                    var total: usize = 0
+                    for n in counts:
+                        total += (usize)n
+                    let table = try Huffman.build(counts, try segment.take(total))
+                    jpeg.tables[target].close()
+                    jpeg.tables[target] = table
+            elif code == 0xdd:
+                jpeg.restart = (usize)(try segment.uint(2))
+            elif code == 0xda:
+                if jpeg.components == 0:
+                    error(corrupt, "lossless JPEG scan before its frame")
+                let count = (usize)(try segment.byte())
+                if count != jpeg.components:
+                    error(unsupported, "lossless JPEG with several scans is not supported")
+                for c in 0..<count:
+                    let identifier = try segment.byte()
+                    if identifier != identifiers[c]:
+                        error(unsupported, "lossless JPEG scan reorders components")
+                    let selector = (usize)(try segment.byte() >> 4)
+                    if selector > 3 or jpeg.tables[selector].bits == 0:
+                        error(corrupt, "lossless JPEG scan names a missing Huffman table")
+                    jpeg.selectors[c] = selector
+                jpeg.predictor = (u32)(try segment.byte())
+                discard(try segment.byte())
+                if (try segment.byte() & 15) != 0 or jpeg.predictor < 1 or jpeg.predictor > 7:
+                    error(unsupported, "lossless JPEG predictor or point transform unsupported")
+                scanned = true
+            elif code == 0xd9:
+                error(corrupt, "lossless JPEG ends before its scan")
+        let samples = jpeg.width *? jpeg.components else error(limit, "lossless JPEG line overflows")
+        if jpeg.restart != 0 and jpeg.restart % jpeg.width != 0:
+            error(unsupported, "lossless JPEG restart intervals must span whole lines")
+        jpeg.lines = try new u16[samples * 2] in memory.heap
+        jpeg.reader = Bits(data = data, position = reader.position, stuffed = true)
+        return jpeg
+
+    ## Decode the next line: `width` pixels of `components` interleaved samples.
+    mutating func next() -> const u16[]!:
+        if self.line >= self.height:
+            error(corrupt, "lossless JPEG read past its last line")
+        let samples = self.width * self.components
+        let current = self.lines[(self.line & 1) * samples..<((self.line & 1) + 1) * samples]
+        let above = self.lines[((self.line + 1) & 1) * samples..<(((self.line + 1) & 1) + 1) * samples]
+        var first = self.line == 0
+        if self.restart != 0 and self.line > 0 and (self.line * self.width) % self.restart == 0:
+            try self.reader.restart()
+            first = true
+        let nc = self.components
+        let base: i32 = (i32)1 << (self.precision - 1)
+        for c in 0..<nc:
+            let delta = try difference(&self.reader, &self.tables[self.selectors[c]])
+            let prediction = base if first else (i32)above[c]
+            current[c] = (u16)((prediction + delta) & 65535)
+        for x in 1..<self.width:
+            let at = x * nc
+            for c in 0..<nc:
+                let delta = try difference(&self.reader, &self.tables[self.selectors[c]])
+                let a = (i32)current[at + c - nc]
+                var prediction = a
+                if not first:
+                    let b = (i32)above[at + c]
+                    let d = (i32)above[at + c - nc]
+                    let p = self.predictor
+                    prediction = a if p == 1 else b if p == 2 else d if p == 3 else a + b - d if p == 4 else a + ((b - d) >> 1) if p == 5 else b + ((a - d) >> 1) if p == 6 else (a + b) >> 1
+                current[at + c] = (u16)((prediction + delta) & 65535)
+        self.line += 1
+        return current
+
+    mutating func close():
+        for i: usize in 0..<4:
+            self.tables[i].close()
+        if self.lines.length > 0:
+            free(self.lines) in memory.heap
+        self = LosslessJpeg()

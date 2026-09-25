@@ -1,0 +1,174 @@
+#==============================================================================================
+#
+#   raw/bits - Bit readers and canonical Huffman tables
+#
+#   DESCRIPTION:
+#       Most raw codings read their bits most significant first. Bits keeps up to 64
+#       of them buffered; JPEG streams additionally drop the zero byte stuffed after
+#       each 0xFF and stop at a marker. Past the data the reader supplies zero bits,
+#       but consuming them is an error, so a truncated stream fails instead of
+#       decoding garbage. Huffman is the lookup table form of a canonical code: one
+#       entry per `bits`-bit prefix holding the code length and its symbol.
+#
+#==============================================================================================
+
+## A most-significant-first bit reader over `data` from `position`.
+struct Bits:
+    var data: const u8[]
+    var position: usize
+    var buffer: u64
+    var count: u32
+    var padding: u32
+    var stuffed: bool
+    var marker: bool
+
+    ## Top the buffer up to at least 57 bits, with zero padding past the data or
+    ## at a JPEG marker.
+    mutating func fill():
+        while self.count <= 56:
+            var byte: u64 = 0
+            if not self.marker and self.position < self.data.length:
+                byte = (u64)self.data[self.position]
+                if self.stuffed and byte == 255:
+                    if self.position + 1 < self.data.length and self.data[self.position + 1] == 0:
+                        self.position += 2
+                    else:
+                        self.marker = true
+                        byte = 0
+                        self.padding += 8
+                else:
+                    self.position += 1
+            else:
+                self.padding += 8
+            self.buffer |= byte << (56 - self.count)
+            self.count += 8
+
+    ## The next `n` bits (at most 32) without consuming them.
+    mutating func peek(n: u32) -> u32:
+        if self.count < n:
+            self.fill()
+        if n == 0:
+            return 0
+        return (u32)(self.buffer >> (64 - n))
+
+    ## Consume `n` bits already peeked; an error when they run past the data.
+    mutating func skip(n: u32) -> !:
+        if self.count < n:
+            self.fill()
+        self.buffer = self.buffer << n if n < 64 else 0
+        self.count -= n
+        if self.count < self.padding:
+            error(corrupt, "raw bit stream is truncated")
+
+    ## Read `n` bits (at most 32).
+    mutating func read(n: u32) -> u32!:
+        let value = self.peek(n)
+        try self.skip(n)
+        return value
+
+    ## Skip to just past the next JPEG restart marker and start afresh there, as
+    ## each restart interval begins on a byte boundary. The marker stops `fill`,
+    ## so no buffered byte lies beyond it.
+    mutating func restart() -> !:
+        var at = self.position
+        while at + 1 < self.data.length and not (self.data[at] == 255 and self.data[at + 1] >= 0xd0 and self.data[at + 1] <= 0xd7):
+            at += 1
+        if at + 1 >= self.data.length:
+            error(corrupt, "JPEG restart marker missing")
+        self.position = at + 2
+        self.buffer = 0
+        self.count = 0
+        self.padding = 0
+        self.marker = false
+
+## A canonical Huffman code as a table indexed by the next `bits` bits: each
+## entry is the code's length shifted left eight, or'd with its symbol; zero
+## marks a prefix no code begins.
+struct Huffman:
+    var table: u16[]
+    var bits: u32
+
+    ## The code with `counts[n]` codes of length n + 1 and the symbols in order.
+    static func build(counts: const u8[], symbols: const u8[]) -> Huffman!:
+        if counts.length != 16:
+            error(corrupt, "Huffman table needs sixteen counts")
+        var longest: u32 = 0
+        var total: usize = 0
+        for n: usize in 0..<16:
+            if counts[n] != 0:
+                longest = (u32)n + 1
+            total += (usize)counts[n]
+        if longest == 0 or total > symbols.length or total > 256:
+            error(corrupt, "invalid Huffman table")
+        let table = try new u16[(usize)1 << longest] in memory.heap
+        var code: usize = 0
+        var index: usize = 0
+        for length in 1..=(usize)longest:
+            for i in 0..<(usize)counts[length - 1]:
+                let span = (usize)1 << ((usize)longest - length)
+                if code + span > table.length:
+                    free(table) in memory.heap
+                    error(corrupt, "Huffman code lengths overflow")
+                for j in 0..<span:
+                    table[code + j] = (u16)(length << 8) | (u16)symbols[index]
+                code += span
+                index += 1
+        return Huffman(table = table, bits = longest)
+
+    ## A code given as a ready table, as some raw formats describe theirs.
+    static func custom(bits: u32, entries: const u16[]) -> Huffman!:
+        if bits == 0 or bits > 16 or entries.length != (usize)1 << bits:
+            error(corrupt, "invalid Huffman lookup table")
+        let table = try new u16[entries.length] in memory.heap
+        memory.copy(table, entries, entries.length)
+        return Huffman(table = table, bits = bits)
+
+    ## The next symbol of `reader`.
+    func decode(reader: Bits*) -> u32!:
+        let entry = self.table[(usize)reader.peek(self.bits)]
+        if entry == 0:
+            error(corrupt, "invalid Huffman code in raw data")
+        try reader.skip((u32)(entry >> 8))
+        return (u32)(entry & 255)
+
+    mutating func close():
+        if self.table.length > 0:
+            free(self.table) in memory.heap
+        self = Huffman()
+
+## The next Huffman-coded JPEG difference: a magnitude category from `table`,
+## then that many bits of value, read with one buffer refill.
+func difference(reader: Bits*, table: const Huffman*) -> i32!:
+    if reader.count < 32:
+        reader.fill()
+    let entry = table.table[(usize)(reader.buffer >> (64 - table.bits))]
+    if entry == 0:
+        error(corrupt, "invalid Huffman code in raw data")
+    let length = (u32)(entry >> 8)
+    let category = (u32)(entry & 255)
+    if category > 16:
+        error(corrupt, "raw difference too long")
+    let bits = length + (category if category < 16 else 0)
+    let value = (i32)((reader.buffer << length) >> (64 - category)) if category > 0 and category < 16 else 0
+    reader.buffer = reader.buffer << bits
+    reader.count -= bits
+    if reader.count < reader.padding:
+        error(corrupt, "raw bit stream is truncated")
+    if category == 0:
+        return 0
+    if category == 16:
+        return -32768
+    if (value & ((i32)1 << (category - 1))) == 0:
+        return value - ((i32)1 << category) + 1
+    return value
+
+## The signed difference a JPEG-style `length`-bit magnitude codes.
+func extend(reader: Bits*, length: u32) -> i32!:
+    if length == 0:
+        return 0
+    if length >= 16:
+        return -32768 if length == 16 else error(corrupt, "raw difference too long")
+    let value = (i32)(try reader.read(length))
+    if (value & ((i32)1 << (length - 1))) == 0:
+        return value - ((i32)1 << length) + 1
+    return value

@@ -1,0 +1,162 @@
+#==============================================================================================
+#
+#   raw/meta - The facts gathered about one raw file
+#
+#   DESCRIPTION:
+#       Each format's parser fills one Meta: where the sensor samples are and how
+#       they are coded, the sensor's layout (active area, crop, color filter array),
+#       its levels, and the color facts (as-shot neutral, matrices, exposure). The
+#       layout and levels are relative to the active area's top-left corner, as DNG
+#       states them, so the develop stage works in one frame for every format.
+#
+#==============================================================================================
+
+## How the sensor samples are stored, naming the unpacker for them.
+enum Coding:
+    unknown
+    unpacked
+    packed
+    ljpeg
+    deflate
+    canon
+    nikon
+    sony_arw2
+    olympus
+    panasonic
+    pentax
+    packed_little
+
+## The color facts of a camera: DNG's two calibrated matrices and their
+## illuminants, or one D65 matrix from the table. Matrices are row-major 3×3;
+## `color` maps XYZ to camera, `forward` maps white-balanced camera to XYZ D50.
+struct Profile:
+    var color1: f64[9]
+    var color2: f64[9]
+    var forward1: f64[9]
+    var forward2: f64[9]
+    var calibration1: f64[9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    var calibration2: f64[9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    var analog: f64[3] = [1.0, 1.0, 1.0]
+    var temperature1: f64 = 6504.0
+    var temperature2: f64 = 6504.0
+    var matrices: usize
+    var forwards: usize
+    var dng: bool
+
+## Everything the decoder learns about a file before reading its samples.
+struct Meta:
+    var format: str
+    var make: str
+    var model: str
+    var little: bool = true
+    # Where the samples are and how they are coded.
+    var coding: Coding = .unknown
+    var raw_width: usize
+    var raw_height: usize
+    var samples: usize = 1
+    var bits: usize = 16
+    var predictor: u64 = 1
+    var offsets: Entry
+    var counts: Entry
+    var tile_width: usize
+    var tile_height: usize
+    var data_offset: usize
+    var data_size: usize
+    var extra: const u8[]
+    var flags: u64
+    var slices: usize[3]
+    var curve: u16[]
+    # Layout, relative to the raw frame (the active area) and then to it.
+    var top: usize
+    var left: usize
+    var width: usize
+    var height: usize
+    var crop_x: usize
+    var crop_y: usize
+    var crop_width: usize
+    var crop_height: usize
+    var cfa: u8[4]
+    var mosaic: bool = true
+    # Levels, per position of a repeating black pattern within the active area.
+    var black: f64[64]
+    var black_rows: usize = 1
+    var black_columns: usize = 1
+    var black_h: Entry
+    var black_v: Entry
+    var white: f64[3]
+    # Masked sensor pixels (top, left, bottom, right in sensor coordinates)
+    # whose per-position mean is the black level, when the file states none.
+    var mask: usize[4]
+    # Color.
+    var neutral: f64[3]
+    var neutral_known: bool
+    var white_xy: f64[2]
+    var profile: Profile = Profile()
+    var matrix: str = "generic"
+    var baseline_exposure: f64
+    var orientation: u64 = 1
+
+    ## The color filter color at active-area row `y`, column `x`: 0 red,
+    ## 1 green, 2 blue.
+    func color(y: usize, x: usize) -> usize:
+        return (usize)self.cfa[(y & 1) * 2 + (x & 1)]
+
+    ## Check the layout fits the sensor and fill the defaults a parser left.
+    mutating func settle() -> !:
+        if self.raw_width == 0 or self.raw_height == 0 or self.raw_width > 100000 or self.raw_height > 100000:
+            error(corrupt, "raw sensor dimensions are invalid")
+        if self.width == 0 or self.height == 0:
+            self.width = self.raw_width - self.left if self.left < self.raw_width else 0
+            self.height = self.raw_height - self.top if self.top < self.raw_height else 0
+        if self.width == 0 or self.height == 0 or self.left + self.width > self.raw_width or self.top + self.height > self.raw_height:
+            error(corrupt, "raw active area lies outside the sensor")
+        if self.crop_width == 0 or self.crop_height == 0 or self.crop_x + self.crop_width > self.width or self.crop_y + self.crop_height > self.height:
+            self.crop_x = 0
+            self.crop_y = 0
+            self.crop_width = self.width
+            self.crop_height = self.height
+        if self.samples != 1 and self.samples != 3:
+            error(unsupported, "raw sensors with other than one or three samples are not supported")
+        if self.mosaic:
+            var seen: u8[3]
+            for c in self.cfa:
+                if c > 2:
+                    error(unsupported, "raw color filter uses a color other than red, green or blue")
+                seen[(usize)c] = 1
+            if seen[0] == 0 or seen[1] == 0 or seen[2] == 0:
+                error(unsupported, "raw color filter lacks red, green or blue")
+        for c: usize in 0..<3:
+            if self.white[c] == 0.0:
+                self.white[c] = self.white[0] if self.white[0] > 0.0 else (f64)(((u64)1 << self.bits) - 1)
+        if self.orientation < 1 or self.orientation > 8:
+            self.orientation = 1
+
+    ## Measure the black level from the masked pixels, when a parser named them:
+    ## the mean of each 2×2 position, truncated, as LibRaw's crop_masked_pixels.
+    mutating func measure_black(mosaic: const Mosaic*):
+        if self.mask[2] <= self.mask[0] or self.mask[3] <= self.mask[1] or self.mask[2] > mosaic.height or self.mask[3] > mosaic.width or mosaic.samples != 1:
+            return
+        var sums: u64[4]
+        var counts: u64[4]
+        for y in self.mask[0]..<self.mask[2]:
+            for x in self.mask[1]..<self.mask[3]:
+                let p = ((y + 4 - self.top % 2) % 2) * 2 + (x + 4 - self.left % 2) % 2
+                sums[p] += (u64)mosaic.data[y * mosaic.width + x]
+                counts[p] += 1
+        for p: usize in 0..<4:
+            if counts[p] == 0:
+                return
+        self.black_rows = 2
+        self.black_columns = 2
+        for p: usize in 0..<4:
+            self.black[p] = (f64)(sums[p] // counts[p])
+
+    mutating func close():
+        if self.curve.length > 0:
+            free(self.curve) in memory.heap
+        var empty: u16[]
+        self.curve = empty
+
+## The EXIF orientation for a maker's rotation in degrees clockwise.
+func orientation_for(degrees: i64) -> u64:
+    return 6 if degrees == 90 else 3 if degrees == 180 else 8 if degrees == 270 else 1

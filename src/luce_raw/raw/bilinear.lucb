@@ -1,0 +1,42 @@
+#==============================================================================================
+#
+#   raw/bilinear - The fast demosaic and the border every demosaic shares
+#
+#   DESCRIPTION:
+#       bilinear_pixel fills a pixel's two missing colors from its 3×3 neighbours,
+#       orthogonal ones weighted twice the diagonal, as dcraw's lin_interpolate.
+#       border_pixel is dcraw's border_interpolate: an unweighted mean of the
+#       neighbours of each missing color, used where AHD lacks the pixels it reads.
+#       Both skip neighbours outside the plane, so they work at every edge.
+#
+#==============================================================================================
+
+## Pixel (`x`, `y`) of a mosaic plane as RGB, missing colors averaged from its
+## 3×3 neighbours: weighted when `weighted` (bilinear), plainly otherwise.
+func mosaic_pixel(plane: const Plane*, x: usize, y: usize, weighted: bool, out: u16[]):
+    var sums: u32[3]
+    var weights: u32[3]
+    let own = plane.color(x, y)
+    for dy: usize in 0..<3:
+        if y + dy < 1 or y + dy - 1 >= plane.height:
+            continue
+        let yy = y + dy - 1
+        for dx: usize in 0..<3:
+            if x + dx < 1 or x + dx - 1 >= plane.width or (dx == 1 and dy == 1):
+                continue
+            let xx = x + dx - 1
+            let c = plane.color(xx, yy)
+            let w: u32 = ((u32)1 << ((u32)(dx == 1) + (u32)(dy == 1))) if weighted else 1
+            sums[c] += (u32)plane.data[yy * plane.width + xx] * w
+            weights[c] += w
+    for c: usize in 0..<3:
+        out[c] = (u16)(sums[c] // weights[c]) if weights[c] > 0 else 0
+    out[own] = plane.data[y * plane.width + x]
+
+## The bilinear demosaic of [x0, x1) × [y0, y1) into `out`, RGB rows of
+## `stride` pixels from (`ox`, `oy`).
+func bilinear_tile(plane: const Plane*, x0: usize, y0: usize, x1: usize, y1: usize, out: u16[], stride: usize, ox: usize, oy: usize):
+    for y in y0..<y1:
+        for x in x0..<x1:
+            let at = ((oy + y - y0) * stride + ox + x - x0) * 3
+            mosaic_pixel(plane, x, y, true, out[at..<at + 3])

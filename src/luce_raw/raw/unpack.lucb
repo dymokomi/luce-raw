@@ -1,0 +1,167 @@
+#==============================================================================================
+#
+#   raw/unpack - Sensor samples into a 16-bit mosaic
+#
+#   DESCRIPTION:
+#       Mosaic holds the whole sensor, masked borders included, as 16-bit samples
+#       after the file's linearization curve. unpack dispatches on the Meta's coding:
+#       the DNG codings (plain, bit-packed, lossless JPEG and Deflate, in strips or
+#       tiles) are here; each proprietary coding lives with its format.
+#
+#==============================================================================================
+
+## The sensor's samples: `width` × `height` pixels of `samples` interleaved values.
+struct Mosaic:
+    var data: u16[]
+    var width: usize
+    var height: usize
+    var samples: usize
+
+    static func create(width: usize, height: usize, samples: usize) -> Mosaic!:
+        let pixels = width *? height else error(limit, "raw sensor size overflows")
+        let count = pixels *? samples else error(limit, "raw sensor size overflows")
+        if count > 402653184:
+            error(limit, "raw sensor exceeds the sample limit")
+        return Mosaic(data = try new u16[count] in memory.heap, width = width, height = height, samples = samples)
+
+    ## Store sample `s` of pixel (`x`, `y`), ignoring positions off the sensor.
+    mutating func put(x: usize, y: usize, s: usize, value: u16):
+        if x < self.width and y < self.height:
+            self.data[(y * self.width + x) * self.samples + s] = value
+
+    mutating func close():
+        if self.data.length > 0:
+            free(self.data) in memory.heap
+        self = Mosaic()
+
+## Read the sensor samples `meta` describes out of `file`.
+func unpack(file: const u8[], meta: const Meta*, threads: usize) -> Mosaic!:
+    var mosaic = try Mosaic.create(meta.raw_width, meta.raw_height, meta.samples)
+    errdefer mosaic.close()
+    match meta.coding:
+        .unpacked, .packed, .ljpeg, .deflate: try unpack_tiles(file, meta, &mosaic, threads)
+        .canon: try unpack_canon(file, meta, &mosaic)
+        .nikon: try unpack_nikon(file, meta, &mosaic)
+        .sony_arw2: try unpack_arw2(file, meta, &mosaic)
+        .olympus: try unpack_olympus(file, meta, &mosaic)
+        .panasonic: try unpack_panasonic(file, meta, &mosaic)
+        .pentax: try unpack_pentax(file, meta, &mosaic)
+        .packed_little: try unpack_packed_little(file, meta, &mosaic)
+        .unknown: error(unsupported, "raw sample coding is not supported")
+    if meta.curve.length == 65536:
+        for i in 0..<mosaic.data.length:
+            mosaic.data[i] = meta.curve[(usize)mosaic.data[i]]
+    return mosaic
+
+## What each tile of `unpack_tiles` reads and writes.
+struct Tiles:
+    var file: const u8[]
+    var meta: const Meta*
+    var mosaic: Mosaic*
+    var across: usize
+
+## Decode tile `index`; tiles cover disjoint rectangles, so `parallel` may run
+## them at once.
+func unpack_tile(context: void*, index: usize) -> !:
+    let job = (Tiles*)context
+    let meta = job.meta
+    let tw = meta.tile_width
+    let th = meta.tile_height
+    let x = index % job.across * tw
+    let y = index // job.across * th
+    let data = try binary.slice(job.file, try meta.offsets.uint(index), try meta.counts.uint(index))
+    match meta.coding:
+        .ljpeg: try unpack_ljpeg_tile(data, job.mosaic, x, y, tw)
+        .deflate: try unpack_deflate_tile(data, meta, job.mosaic, x, y, tw, th)
+        _: try unpack_plain_tile(data, meta, job.mosaic, x, y, tw, th)
+
+## The strips or tiles of a DNG-style raw, each decoded into its rectangle.
+func unpack_tiles(file: const u8[], meta: const Meta*, mosaic: Mosaic*, threads: usize) -> !:
+    let tw = meta.tile_width
+    let th = meta.tile_height
+    if tw == 0 or th == 0 or tw > 65536 or th > 65536:
+        error(corrupt, "raw tile dimensions are invalid")
+    let across = (meta.raw_width + tw - 1) // tw
+    let down = (meta.raw_height + th - 1) // th
+    if meta.offsets.count != across * down or meta.counts.count != across * down:
+        error(corrupt, "raw tile table does not match the image")
+    var job = Tiles(file = file, meta = meta, mosaic = mosaic, across = across)
+    try parallel(across * down, threads, (void*)&job, unpack_tile)
+
+## Samples of `meta.bits` each, rows starting on a byte boundary: whole bytes
+## for 8 and 16 bits in the file's byte order, most significant bit first
+## otherwise.
+func unpack_plain_tile(data: const u8[], meta: const Meta*, mosaic: Mosaic*, x0: usize, y0: usize, tw: usize, th: usize) -> !:
+    let ns = meta.samples
+    let bits = meta.bits
+    let rows = th if y0 + th <= mosaic.height else mosaic.height - y0
+    let row_bytes = (tw * ns * bits + 7) // 8
+    if data.length < row_bytes * (rows - 1) + (tw * ns * bits + 7) // 8:
+        error(corrupt, "raw strip or tile is truncated")
+    let columns = tw if x0 + tw <= mosaic.width else mosaic.width - x0
+    for y in 0..<rows:
+        let row = data[y * row_bytes..]
+        let target = ((y0 + y) * mosaic.width + x0) * ns
+        if bits == 16:
+            for i in 0..<columns * ns:
+                let a = (u16)row[i * 2]
+                let b = (u16)row[i * 2 + 1]
+                mosaic.data[target + i] = a | (b << 8) if meta.little else (a << 8) | b
+        elif bits == 8:
+            for i in 0..<columns * ns:
+                mosaic.data[target + i] = (u16)row[i]
+        else:
+            var reader = Bits(data = row)
+            for i in 0..<columns * ns:
+                mosaic.data[target + i] = (u16)(try reader.read((u32)bits))
+
+## One lossless JPEG tile: its samples fill the tile row by row.
+func unpack_ljpeg_tile(data: const u8[], mosaic: Mosaic*, x0: usize, y0: usize, tw: usize) -> !:
+    var jpeg = try LosslessJpeg.open(data)
+    defer jpeg.close()
+    let ns = mosaic.samples
+    if jpeg.components % ns != 0 and ns % jpeg.components != 0:
+        error(corrupt, "lossless JPEG components do not fit the raw samples")
+    var x: usize = 0
+    var y: usize = 0
+    var s: usize = 0
+    for line in 0..<jpeg.height:
+        let samples = try jpeg.next()
+        for value in samples:
+            mosaic.put(x0 + x, y0 + y, s, value)
+            s += 1
+            if s == ns:
+                s = 0
+                x += 1
+                if x >= tw:
+                    x = 0
+                    y += 1
+
+## One Deflate tile of 8- or 16-bit samples, with DNG's horizontal predictors.
+func unpack_deflate_tile(data: const u8[], meta: const Meta*, mosaic: Mosaic*, x0: usize, y0: usize, tw: usize, th: usize) -> !:
+    let ns = meta.samples
+    if meta.bits != 8 and meta.bits != 16:
+        error(unsupported, "Deflate DNGs must have 8- or 16-bit samples")
+    let bytes = meta.bits // 8
+    let rows = th if y0 + th <= mosaic.height else mosaic.height - y0
+    let raw = try alloc u8[tw * ns * bytes * rows] in memory.heap
+    defer free(raw) in memory.heap
+    try compress.inflate(data, raw)
+    let p = meta.predictor
+    let factor: usize = 1 if p == 34892 or p == 2 else 2 if p == 34893 else 4 if p == 34894 else 0
+    if p != 1 and factor == 0:
+        error(unsupported, "DNG Deflate predictor is not supported")
+    let columns = tw if x0 + tw <= mosaic.width else mosaic.width - x0
+    let line = tw * ns
+    let values = try alloc u16[line] in memory.heap
+    defer free(values) in memory.heap
+    for y in 0..<rows:
+        for i in 0..<line:
+            let at = (y * line + i) * bytes
+            values[i] = (u16)raw[at] if bytes == 1 else ((u16)raw[at] | ((u16)raw[at + 1] << 8) if meta.little else ((u16)raw[at] << 8) | (u16)raw[at + 1])
+        if factor > 0:
+            let stride = factor * ns
+            for i in stride..<line:
+                values[i] = values[i] +% values[i - stride]
+        let target = ((y0 + y) * mosaic.width + x0) * ns
+        memory.copy(mosaic.data[target..], values, columns * ns)

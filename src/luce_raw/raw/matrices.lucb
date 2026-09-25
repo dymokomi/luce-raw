@@ -1,0 +1,66 @@
+#==============================================================================================
+#
+#   raw/matrices - The color matrix of a proprietary raw's camera
+#
+#   DESCRIPTION:
+#       Proprietary raws carry no calibrated color matrix, so each camera's comes
+#       from the tables in matrices_*.lucb: Adobe's XYZ(D65)-to-camera matrix, with
+#       the black and white levels dcraw and LibRaw know for that model. A camera
+#       missing from the tables develops with a generic matrix (camera RGB taken as
+#       sRGB) and says so through Info.matrix and the "raw.matrix" attribute.
+#
+#==============================================================================================
+
+## One camera's color facts, as the tables list them.
+struct CameraColor:
+    var prefix: str
+    var black: i32
+    var white: i32
+    var xyz: i32[9]
+
+## The table for a maker's name.
+func colors_for(make: str) -> const CameraColor[]:
+    var none_found: const CameraColor[]
+    if starts(make, "Canon"): return canon_colors
+    if starts(make, "NIKON"): return nikon_colors
+    if starts(make, "SONY"): return sony_colors
+    if starts(make, "Panasonic"): return panasonic_colors
+    if starts(make, "LEICA"): return leica_colors
+    if starts(make, "FUJIFILM"): return fujifilm_colors
+    if starts(make, "OLYMPUS") or starts(make, "OM Digital"): return olympus_colors
+    if starts(make, "PENTAX"): return pentax_colors
+    if starts(make, "RICOH"): return ricoh_colors
+    return none_found
+
+## The model name as the tables spell it: without a leading maker word.
+func table_model(make: str, model: str) -> str:
+    var word: usize = 0
+    while word < make.length and make.bytes[word] != ' ':
+        word += 1
+    if word > 0 and model.length > word + 1 and model.bytes[word] == ' ' and starts(model, (str)make.bytes[..<word]):
+        return (str)model.bytes[word + 1..]
+    return model
+
+## Give `meta` its camera's matrix and levels from the tables, or the generic
+## matrix when the camera is not listed.
+func lookup_matrix(meta: Meta*):
+    let model = table_model(meta.make, meta.model)
+    meta.profile = Profile(matrices = 1)
+    meta.profile.color1 = [3.2404542, -1.5371385, -0.4985314, -0.9692660, 1.8760108, 0.0415560, 0.0556434, -0.2040259, 1.0572252]
+    meta.matrix = "generic"
+    for entry in colors_for(meta.make):
+        if not starts(model, entry.prefix):
+            continue
+        let stated = meta.black[0] != 0.0 or meta.mask[2] > meta.mask[0]
+        if entry.black > 0 or (entry.black < 0 and not stated):
+            meta.black_rows = 1
+            meta.black_columns = 1
+            meta.black[0] = (f64)(entry.black if entry.black > 0 else -entry.black)
+            meta.mask = [0, 0, 0, 0]
+        if entry.white > 0:
+            meta.white = [(f64)entry.white, (f64)entry.white, (f64)entry.white]
+        if entry.xyz[0] != 0 or entry.xyz[4] != 0:
+            for i: usize in 0..<9:
+                meta.profile.color1[i] = (f64)entry.xyz[i] / 10000.0
+            meta.matrix = "table"
+        return

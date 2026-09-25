@@ -1,0 +1,57 @@
+#==============================================================================================
+#
+#   raw/parallel - Independent work items on several threads
+#
+#   DESCRIPTION:
+#       parallel runs `work(context, index)` for every index below `count`, workers
+#       taking the next index from a shared counter. Items must write disjoint
+#       memory. The first failure stops further items and is returned once every
+#       worker has finished, so a corrupt tile reports its own error.
+#
+#==============================================================================================
+
+## The shared state of one parallel run.
+struct Run:
+    var context: void*
+    var work: func(void*, usize) -> unit!
+    var count: usize
+    var next: @usize
+    var failed: @bool
+
+## One worker's share: how it ended.
+struct Share:
+    var run: Run*?
+    var failure: Error?
+
+func run_worker(raw: void*?):
+    let share = (Share*)(raw else return)
+    let job = share.run else return
+    while not job.failed.load(.acquire):
+        let index = job.next.add(1, .relaxed)
+        if index >= job.count:
+            return
+        job.work(job.context, index) catch failure:
+            share.failure = failure
+            job.failed.store(true, .release)
+            return
+
+## Run `work(context, index)` for each index below `count` on up to `threads`
+## threads (the caller's among them).
+func parallel(count: usize, threads: usize, context: void*, work: func(void*, usize) -> unit!) -> !:
+    var job = Run(context = context, work = work, count = count)
+    let n = (usize)math.imin(math.imin(math.imax((i64)threads, 1), 64), (i64)math.imax((i64)count, 1))
+    var shares: Share[64]
+    var handles: thread.Handle[64]
+    var started: usize = 0
+    for i in 0..<n:
+        shares[i] = Share(run = &job)
+    for i in 1..<n:
+        handles[started] = thread.spawn(run_worker, (void*)&shares[i], name = "luce-raw") catch failure:
+            break
+        started += 1
+    run_worker((void*)&shares[0])
+    for i in 0..<started:
+        try handles[i].join()
+    for i in 0..<n:
+        if let failure = shares[i].failure:
+            error(failure.code, failure.message)
