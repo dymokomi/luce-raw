@@ -20,8 +20,6 @@ let raw_makers: str[16] = ["Canon", "NIKON", "SONY", "OLYMPUS", "OM Digital", "P
 ## The message for a raw format this package recognizes but cannot develop,
 ## or empty.
 func foreign_raw(file: const u8[]) -> str:
-    if file.length >= 12 and (str)file[4..<8] == "ftyp" and (str)file[8..<12] == "crx ":
-        return "Canon CR3 raws are not supported yet"
     if file.length >= 14 and (str)file[6..<14] == "HEAPCCDR":
         return "Canon CRW raws are not supported"
     if file.length >= 4 and (str)file[..<4] == "FOVb":
@@ -30,13 +28,17 @@ func foreign_raw(file: const u8[]) -> str:
         return "Minolta MRW raws are not supported"
     return ""
 
+## Whether `file` is an ISO media file of the Canon CR3 brand.
+func is_cr3(file: const u8[]) -> bool:
+    return file.length >= 12 and (str)file[4..<8] == "ftyp" and (str)file[8..<12] == "crx "
+
 ## Whether `data` is a camera raw, whether or not this package can develop
 ## it: false for plain TIFFs and other images. Where `detect` is false and
 ## this is true, `probe` fails with a message naming what is not supported.
 pub func recognize(data: const u8[]) -> bool:
     if data.length < 16:
         return false
-    if foreign_raw(data).length > 0 or (str)data[..<8] == "FUJIFILM":
+    if foreign_raw(data).length > 0 or (str)data[..<8] == "FUJIFILM" or is_cr3(data):
         return true
     if not ((data[0] == 'I' and data[1] == 'I') or (data[0] == 'M' and data[1] == 'M')):
         return false

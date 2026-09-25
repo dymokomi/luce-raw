@@ -1,6 +1,6 @@
 # luce-raw
 
-Camera RAW decoding for Luce/Base: DNG, Canon CR2, Nikon NEF, Sony ARW, Olympus ORF,
+Camera RAW decoding for Luce/Base: DNG, Canon CR2 and CR3, Nikon NEF, Sony ARW, Olympus ORF,
 Panasonic RW2, Pentax PEF and Fujifilm RAF (Bayer and X-Trans, uncompressed and
 compressed) into scene-linear RGB, in pure Luce
 Base with no platform codecs. It develops the sensor data the way a raw converter's
@@ -24,10 +24,10 @@ try raw.decode(&image, options)                # image.pixels: linear sRGB, RGB 
 
 - `detect(data) -> bool`: whether this package can develop the bytes (plain TIFFs: false).
 - `recognize(data) -> bool`: whether the bytes are a camera raw at all, developable or
-  not (CR3, CRW, X3F, MRW, or a maker TIFF holding sensor data). When `detect` is false
+  not (CRW, X3F, MRW, or a maker TIFF holding sensor data). When `detect` is false
   and `recognize` true, `probe` and `decode` fail with a message saying what is not
-  supported (for example "Canon CR3 raws are not supported yet"), so an editor can
-  show that instead of treating the file as a plain TIFF.
+  supported (for example "Canon CRW raws are not supported"), so an editor can show
+  that instead of treating the file as a plain TIFF.
 - `probe(image: Raster*, options = Options()) -> !`: sizes the Raster from
   `image.encoded`: the developed width and height (after the default crop and
   orientation), three `float32` channels, `file_format` ("DNG", "CR2", ...), and the
@@ -58,6 +58,7 @@ matrix: white-balanced camera RGB, for profiling), `threads` (zero: one per proc
 | --- | --- | --- |
 | DNG | uncompressed (8/16-bit and bit-packed), lossless JPEG (strips and tiles), Deflate (8/16-bit, horizontal predictors) | Bayer CFA of any 2×2 pattern and LinearRaw; LinearizationTable, BlackLevel with repeat patterns and row/column deltas, WhiteLevel, ActiveArea, DefaultCrop; AsShotNeutral or AsShotWhiteXY; ColorMatrix1/2 with CameraCalibration, AnalogBalance and ForwardMatrix1/2 interpolated for the white's temperature as the DNG SDK does, into XYZ D50 and by Bradford to sRGB; BaselineExposure (+ offset); Orientation |
 | Canon CR2 | lossless JPEG with slices | sensor rectangle from the maker note, black measured from the masked columns (or the color data's levels), as-shot white balance from the color data |
+| Canon CR3 | CRX: lossless, and C-RAW (up to three levels of 5/3 wavelets, per-subband and version 0x200's per-area quantization), tiled, as LibRaw's crx.cpp | ISO media container; IFD0 and maker note from Canon's uuid box, color data (white balance, black levels) from the CTMD track; the largest raw track |
 | Nikon NEF | lossless and lossy Huffman (with the split-row trees), uncompressed and bit-packed | linearization curve, white balance and black level from the maker note (quartered for 12-bit files, as Nikon states it on the 14-bit scale) |
 | Sony ARW | ARW2 (with the tone curve), uncompressed, lossless (JPEG tiles) | white balance and black from the encrypted SR2 sub-IFD, DefaultCrop |
 | Olympus ORF | compressed 12-bit, uncompressed | white balance, black, valid bits and crop from the ImageProcessing directory |
@@ -129,14 +130,15 @@ oracle runs in a virtual environment under `build/venv`.
 Developing a 24 MP raw on a 16-core Apple M-series machine (`--release`, probe and
 decode, file already in memory): 0.32–0.44 s for tiled DNG and for lossless,
 uncompressed and ARW2 Sony files; 0.6–0.7 s for NEF, CR2 and single-strip DNG, whose
-one entropy-coded stream decodes on a single thread. Compressed RAF decodes its
+one entropy-coded stream decodes on a single thread. CR3 decodes its four planes in
+parallel: about 0.8 s for 24 MP, 1.2 s for the R5's 45 MP. Compressed RAF decodes its
 strips in parallel; X-Trans at `best` takes about 2.1 s for 24 MP (Markesteijn's
 three passes in eight directions), 0.45 s at `fast`. Bilinear (`fast`) saves
 0.15–0.2 s on Bayer files. Tiled decoding, levels and demosaicing use every processor.
 
 ## Not supported yet
 
-Canon CR3 (CRX), CRW and sRAW/mRAW; Nikon HE/HE*; 14-bit Olympus/OM ORF; Panasonic
+Canon CRW, sRAW/mRAW and CR3's CRX encoding 3; Nikon HE/HE*; 14-bit Olympus/OM ORF; Panasonic
 raw formats 5–8 (GH5S, S1, GH6 and later); Fujifilm SuperCCD (rotated) RAF; Sony
 ARW1 and Sony's newer lossy codings; floating-point and lossy-JPEG DNGs, DNG opcode
 lists (the lens-shading GainMaps phone DNGs rely on), DefaultScale, and filter

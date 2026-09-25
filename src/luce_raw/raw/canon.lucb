@@ -34,26 +34,29 @@ func canon_as_shot(count: usize) -> usize:
     if count == 582: return 0x19
     if count == 653: return 0x18
     if count == 5120 or count == 1816 or count == 1820 or count == 1824: return 0x47
-    if count == 2024 or count == 3656: return 0x55
+    if count == 1770 or count == 2024 or count == 3656: return 0x55
     if count == 3973 or count == 3778 or count == 4528: return 0x69
     return 0x3f
 
-## The short index of the per-channel black levels in Canon's color data, by
-## its length and sub-version; zero when unknown.
-func canon_black_at(count: usize, version: u64) -> usize:
-    if count == 582: return 0xa6
-    if count == 653: return 0x11e
-    if count == 796: return 0xc4
+## The short indexes of the per-channel black levels in Canon's color data,
+## by its length and sub-version, and a second place to look when the first
+## holds zeros; zero when unknown.
+func canon_black_at(count: usize, version: u64) -> (usize, usize):
+    if count == 582: return (0xa6, 0)
+    if count == 653: return (0x11e, 0)
+    if count == 796: return (0xc4, 0)
     if count == 674 or count == 692 or count == 702 or count == 1227 or count == 1250 or count == 1251 or count == 1337 or count == 1338 or count == 1346:
-        return 0x2b4 if version == 4 or version == 5 else 0x2cb if version == 6 or version == 7 else 0x2cf if version == 9 else 0xe7
-    if count == 1273 or count == 1275: return 0x1df
+        return (0x2b4 if version == 4 or version == 5 else 0x2cb if version == 6 or version == 7 else 0x2cf if version == 9 else 0xe7, 0)
+    if count == 1273 or count == 1275: return (0x1df, 0)
     if count == 1312 or count == 1313 or count == 1316 or count == 1506:
-        return 0x1f8 if version == 10 else 0x2d8 if version == 11 else 0
+        return (0x1f8 if version == 10 else 0x2d8 if version == 11 else 0, 0)
     if count == 1560 or count == 1592 or count == 1353 or count == 1602:
-        return 0x22c if version == 14 else 0x30a
-    if count == 1816 or count == 1820 or count == 1824 or count == 2024 or count == 3656 or count == 3973 or count == 3778:
-        return 0x69 + 0x213
-    return 0
+        return (0x22c if version == 14 else 0x30a, 0)
+    if count == 1816 or count == 1820 or count == 1824: return (0x47 + 0x2d1, 0x47 + 0x102)
+    if count == 1770 or count == 2024 or count == 3656: return (0x55 + 0x2d1, 0x55 + 0x102)
+    if count == 3973 or count == 3778: return (0x69 + 0x213, 0x69 + 0x102)
+    if count == 4528: return (0x69 + 0x227, 0x69 + 0x116)
+    return (0, 0)
 
 ## Fill `meta` from a Canon CR2.
 func parse_cr2(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
@@ -98,6 +101,18 @@ func parse_cr2(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
     let exif = tree.exif else error(corrupt, "CR2 has no EXIF directory")
     let note = try exif.find(37500) else error(corrupt, "CR2 has no maker note")
     let maker = try Directory.open(file, 0, note.position, main.little)
+    try canon_borders(&maker, meta)
+    if not known:
+        red_top = (meta.top + 1) & ~(usize)1
+        red_left = (meta.left + 1) & ~(usize)1
+    # Black: measured left of the image for known sensors, as LibRaw does;
+    # otherwise the levels the color data states.
+    if known and red_left > 4:
+        meta.mask = [meta.top, 2, meta.top + meta.height, red_left - 2]
+    try canon_color_data(&maker, meta, red_top, red_left, not known)
+
+## The sensor's image rectangle from Canon's SensorInfo (0x00e0).
+func canon_borders(maker: const Directory*, meta: Meta*) -> !:
     if let borders = try maker.find(0xe0):
         if borders.count >= 9:
             let left = (usize)(try borders.uint(5))
@@ -109,11 +124,11 @@ func parse_cr2(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
                 meta.top = top
                 meta.width = right - left + 1
                 meta.height = bottom - top + 1
-    if not known:
-        red_top = (meta.top + 1) & ~(usize)1
-        red_left = (meta.left + 1) & ~(usize)1
-    # Red at (red_top, red_left) in sensor coordinates; `cfa` is from the
-    # active area's corner.
+
+## The filter pattern for red at (`red_top`, `red_left`) in sensor
+## coordinates, and from Canon's ColorData (0x4001) the as-shot white balance
+## and, when `stated_black`, the per-channel black levels.
+func canon_color_data(maker: const Directory*, meta: Meta*, red_top: usize, red_left: usize, stated_black: bool) -> !:
     # `rggb` is each active 2×2 position's index in Canon's R, G1, G2, B order.
     var rggb: usize[4]
     for p: usize in 0..<4:
@@ -121,13 +136,17 @@ func parse_cr2(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
         let x = (meta.left + p % 2 + 2 - red_left % 2) % 2
         rggb[p] = y * 2 + x
         meta.cfa[p] = 0 if rggb[p] == 0 else 2 if rggb[p] == 3 else 1
-    # Black: measured left of the image for known sensors, as LibRaw does;
-    # otherwise the levels the color data states.
-    if known and red_left > 4:
-        meta.mask = [meta.top, 2, meta.top + meta.height, red_left - 2]
     if let colors = try maker.find(0x4001):
-        let black_at = canon_black_at(colors.count, try colors.uint(1)) if colors.count > 1 else 0
-        if not known and black_at > 0 and colors.count > black_at + 3:
+        let (primary, fallback) = canon_black_at(colors.count, try colors.uint(1) if colors.count > 1 else 0)
+        # LibRaw takes the second place when the first averages to zero.
+        var black_at = primary
+        if primary > 0 and fallback > 0 and colors.count > primary + 3:
+            var sum: f64 = 0.0
+            for c: usize in 0..<4:
+                sum += try colors.real(primary + c)
+            if math.floor(sum / 4.0) == 0.0:
+                black_at = fallback
+        if stated_black and black_at > 0 and colors.count > black_at + 3:
             meta.black_rows = 2
             meta.black_columns = 2
             for p: usize in 0..<4:

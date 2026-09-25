@@ -11,8 +11,8 @@
 #
 #==============================================================================================
 
-## Whether this package can develop `data`: a DNG or a maker raw (CR2, NEF,
-## ARW, ORF, RW2, PEF, RAF) in a coding it reads. Plain TIFFs answer false; for
+## Whether this package can develop `data`: a DNG or a maker raw (CR2, CR3,
+## NEF, ARW, ORF, RW2, PEF, RAF) in a coding it reads. Plain TIFFs answer false; for
 ## raws it cannot develop, `recognize` answers true and `probe` says why.
 pub func detect(data: const u8[]) -> bool:
     var meta = parse(data) catch failure:
@@ -31,6 +31,8 @@ func parse(file: const u8[]) -> Meta!:
         error(unsupported, foreign)
     if (str)file[..<8] == "FUJIFILM":
         try parse_raf(file, &meta)
+    elif is_cr3(file):
+        try parse_cr3(file, &meta)
     else:
         let tree = try Tree.walk(file, 0, 0)
         if try tree.holding(50706) != none:

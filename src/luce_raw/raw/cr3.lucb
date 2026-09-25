@@ -1,0 +1,228 @@
+#==============================================================================================
+#
+#   raw/cr3 - Canon CR3: the ISO media container around CRX
+#
+#   DESCRIPTION:
+#       A CR3 is an ISO base media file: `moov` holds Canon's uuid box with the
+#       TIFF-coded IFD0 (CMT1) and maker note (CMT3), and one track per picture;
+#       each raw track's sample description (CRAW) carries the CMP1 header of its
+#       CRX coding, its size table (stsz) and chunk offset (co64) locate the
+#       sample in `mdat`. The largest raw track is the image; crx_*.lucb decode
+#       it. The maker note is read as a CR2's is.
+#
+#==============================================================================================
+
+## The CMP1 header of a CRX-coded picture.
+struct CrxHeader:
+    var version: u32
+    var width: usize
+    var height: usize
+    var tile_width: usize
+    var tile_height: usize
+    var bits: u32
+    var planes: usize
+    var layout: u32
+    var encoding: u32
+    var levels: usize
+    var header_size: usize
+
+## One track as the walk finds it.
+struct Cr3Track:
+    var handler: u32
+    var format: u32
+    var raw: bool
+    var header: CrxHeader
+    var offset: u64
+    var size: u64
+
+## What the walk gathers.
+struct Cr3Walk:
+    var tracks: Cr3Track[8]
+    var count: usize
+    var ifd0: usize
+    var note: usize
+
+let canon_uuid: u8[16] = [0x85, 0xc0, 0xb6, 0x87, 0x82, 0x0f, 0x11, 0xe0, 0x81, 0x11, 0xf4, 0xce, 0x46, 0x2b, 0x6a, 0x48]
+
+## A big-endian four-character code.
+inline func fourcc(text: str) -> u32:
+    let b = text.bytes
+    return ((u32)b[0] << 24) | ((u32)b[1] << 16) | ((u32)b[2] << 8) | (u32)b[3]
+
+func same_bytes(a: const u8[], b: const u8[]) -> bool:
+    if a.length != b.length:
+        return false
+    for i in 0..<a.length:
+        if a[i] != b[i]:
+            return false
+    return true
+
+## Walk the boxes in [start, end); `nesting` guards against nesting loops.
+func cr3_boxes(file: const u8[], start: usize, end: usize, nesting: usize, walk: Cr3Walk*) -> !:
+    if nesting > 12:
+        error(corrupt, "CR3 boxes nest too deeply")
+    var at = start
+    while at + 8 <= end:
+        var box = Reader(data = file, position = at, little = false)
+        var size = try box.uint(4)
+        let name = (u32)(try box.uint(4))
+        var header: usize = 8
+        if size == 1:
+            size = try box.uint(8)
+            header = 16
+        elif size == 0:
+            size = (u64)(end - at)
+        if size < (u64)header or size > (u64)(end - at):
+            error(corrupt, "CR3 box extends past its parent")
+        let body = at + header
+        let stop = at + (usize)size
+        if name == fourcc("moov") or name == fourcc("mdia") or name == fourcc("minf") or name == fourcc("stbl"):
+            try cr3_boxes(file, body, stop, nesting + 1, walk)
+        elif name == fourcc("trak"):
+            if walk.count == walk.tracks.length:
+                error(unsupported, "CR3 has too many tracks")
+            walk.count += 1
+            try cr3_boxes(file, body, stop, nesting + 1, walk)
+        elif name == fourcc("uuid") and stop - body > 16 and same_bytes(file[body..<body + 16], canon_uuid[0..]):
+            try cr3_boxes(file, body + 16, stop, nesting + 1, walk)
+        elif name == fourcc("CMT1"):
+            walk.ifd0 = body
+        elif name == fourcc("CMT3"):
+            walk.note = body
+        elif walk.count > 0:
+            try cr3_track_box(file, name, body, stop, nesting, walk)
+        at = stop
+
+## The boxes of a track that describe its media.
+func cr3_track_box(file: const u8[], name: u32, body: usize, stop: usize, nesting: usize, walk: Cr3Walk*) -> !:
+    let track = &walk.tracks[walk.count - 1]
+    var reader = Reader(data = file, position = body, little = false)
+    if name == fourcc("hdlr"):
+        discard(try reader.take(8))
+        track.handler = (u32)(try reader.uint(4))
+    elif name == fourcc("stsd"):
+        # Version, entry count, then the entries: CRAW describes a raw picture,
+        # CTMD Canon's timed metadata.
+        discard(try reader.take(12))
+        track.format = (u32)(try reader.uint(4))
+        try cr3_boxes(file, body + 8, stop, nesting + 1, walk)
+    elif name == fourcc("CRAW") and track.handler == fourcc("vide"):
+        try cr3_boxes(file, body + 82, stop, nesting + 1, walk)
+    elif name == fourcc("CMP1"):
+        track.header = try crx_header(file[body..<stop])
+        track.raw = true
+    elif name == fourcc("stsz"):
+        discard(try reader.take(4))
+        let fixed = try reader.uint(4)
+        discard(try reader.uint(4))
+        track.size = fixed if fixed != 0 else try reader.uint(4)
+    elif name == fourcc("co64"):
+        discard(try reader.take(4))
+        if try reader.uint(4) < 1:
+            error(corrupt, "CR3 track has no chunks")
+        track.offset = try reader.uint(8)
+
+## The CMP1 header, validated as LibRaw's crxParseImageHeader.
+func crx_header(data: const u8[]) -> CrxHeader!:
+    if data.length < 32:
+        error(corrupt, "CR3 CMP1 header is truncated")
+    var reader = Reader(data = data, position = 4, little = false)
+    var h = CrxHeader()
+    h.version = (u32)(try reader.uint(2))
+    discard(try reader.uint(2))
+    h.width = (usize)(try reader.uint(4))
+    h.height = (usize)(try reader.uint(4))
+    h.tile_width = (usize)(try reader.uint(4))
+    h.tile_height = (usize)(try reader.uint(4))
+    h.bits = (u32)data[24]
+    h.planes = (usize)(data[25] >> 4)
+    h.layout = (u32)(data[25] & 15)
+    h.encoding = (u32)(data[26] >> 4)
+    h.levels = (usize)(data[26] & 15)
+    reader.position = 28
+    h.header_size = (usize)(try reader.uint(4))
+    if (h.version != 0x100 and h.version != 0x200) or h.header_size == 0 or h.levels > 3:
+        error(unsupported, "this CR3 CRX header is not supported")
+    if h.encoding == 3:
+        error(unsupported, "CR3 files coded in CRX encoding 3 are not supported yet")
+    if h.encoding > 1 or h.bits > (15 if h.encoding == 1 else 14) or h.planes != 4 or h.width % 2 != 0 or h.height % 2 != 0 or h.tile_width % 2 != 0 or h.tile_height % 2 != 0 or h.layout > 3 or h.bits < 9:
+        error(unsupported, "this CR3 CRX coding is not supported")
+    if h.tile_width > h.width or h.tile_height > h.height or h.width == 0 or h.height == 0:
+        error(corrupt, "CR3 CRX tiles do not fit the picture")
+    return h
+
+## Fill `meta` from a Canon CR3.
+func parse_cr3(file: const u8[], meta: Meta*) -> !:
+    meta.format = "CR3"
+    var walk = Cr3Walk()
+    try cr3_boxes(file, 0, file.length, 0, &walk)
+    var best: usize = walk.count
+    var bits: u64 = 0
+    for i in 0..<walk.count:
+        let t = walk.tracks[i]
+        let size = (u64)t.header.bits * (u64)t.header.width * (u64)t.header.height
+        if t.raw and t.size > 0 and size > bits:
+            bits = size
+            best = i
+    if best == walk.count:
+        error(corrupt, "CR3 has no raw track")
+    let track = walk.tracks[best]
+    meta.crx = track.header
+    meta.coding = .crx
+    meta.data_offset = (usize)track.offset
+    meta.data_size = (usize)track.size
+    discard(try binary.slice(file, track.offset, track.size))
+    meta.raw_width = try dimension((u64)track.header.width)
+    meta.raw_height = try dimension((u64)track.header.height)
+    meta.bits = (usize)track.header.bits
+    meta.white = [(f64)(((u64)1 << (u64)meta.bits) - 1), 0.0, 0.0]
+    # IFD0 and the maker note are TIFFs counting offsets from their own start.
+    if walk.ifd0 == 0 or walk.note == 0:
+        error(corrupt, "CR3 lacks its metadata boxes")
+    let ifd0 = try Tree.walk(file, walk.ifd0, walk.ifd0)
+    let main = try ifd0.at(0)
+    meta.make = try main.text(271)
+    meta.model = table_model(meta.make, try main.text(272))
+    meta.orientation = try main.uint(274, 1)
+    let (little, first) = try tiff_header(file, walk.note)
+    let maker = try Directory.open(file, (i64)walk.note, walk.note + first, little)
+    try canon_borders(&maker, meta)
+    # The color data (white balance, black levels) is in the metadata track.
+    var colors = maker
+    for i in 0..<walk.count:
+        if walk.tracks[i].format == fourcc("CTMD"):
+            if let found = try cr3_color_note(file, &walk.tracks[i]):
+                colors = found
+    # CMP1's layout names the colors at the sensor's corner: RGGB, GRBG, GBRG, BGGR.
+    let red_top: usize = 0 if track.header.layout < 2 else 1
+    let red_left: usize = 0 if track.header.layout == 0 or track.header.layout == 2 else 1
+    try canon_color_data(&colors, meta, red_top, red_left, true)
+
+## The maker note in a CTMD track's records (types 7 and 8) that holds
+## Canon's ColorData (0x4001), as LibRaw's parseCR3_CTMD finds it.
+func cr3_color_note(file: const u8[], track: const Cr3Track*) -> Directory?!:
+    let data = try binary.slice(file, track.offset, track.size)
+    var at: usize = 0
+    while at + 6 < data.length:
+        var record = Reader(data = data, position = at)
+        let size = (usize)(try record.uint(4))
+        let kind = try record.uint(2)
+        if size < 1 or at + size > data.length:
+            return none
+        if kind == 7 or kind == 8:
+            var box = at + 12
+            while box + 8 < at + size:
+                var entry = Reader(data = data, position = box)
+                let length = (usize)(try entry.uint(4))
+                let tag = try entry.uint(4)
+                if length < 8 or box + length > at + size:
+                    return none
+                if tag == 0x927c:
+                    let start = (usize)track.offset + box + 8
+                    let (little, first) = try tiff_header(file, start)
+                    let note = try Directory.open(file, (i64)start, start + first, little)
+                    if try note.find(0x4001) != none:
+                        return note
+                box += length
+        at += size
+    return none

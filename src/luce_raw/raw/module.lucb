@@ -14,7 +14,10 @@
 #       ljpeg.lucb     lossless JPEG (ITU T.81 process 14) with tiles and slices
 #       meta.lucb      the facts a decoder gathers about one file
 #       dng.lucb       DNG: raw directory, levels, crop and color tags
-#       canon.lucb     Canon CR2
+#       canon.lucb     Canon CR2, and the maker note CR3 shares
+#       cr3.lucb       Canon CR3's ISO media container
+#       crx_lines.lucb, crx_top.lucb, crx_wavelet.lucb, crx_image.lucb, crx_decode.lucb
+#                      Canon's CRX coding: subband lines, wavelets, headers, planes
 #       nikon.lucb     Nikon NEF and its lossless Huffman coding
 #       sony.lucb      Sony ARW, ARW2 blocks and the SR2 white balance
 #       olympus.lucb, panasonic.lucb, pentax.lucb, fujifilm.lucb
@@ -41,7 +44,7 @@
 #==============================================================================================
 
 ## Camera RAW decoding: DNG (uncompressed, lossless JPEG, Deflate; Bayer and
-## LinearRaw), Canon CR2, Nikon NEF, Sony ARW, Olympus ORF, Panasonic RW2,
+## LinearRaw), Canon CR2 and CR3, Nikon NEF, Sony ARW, Olympus ORF, Panasonic RW2,
 ## Pentax PEF and Fujifilm RAF (Bayer and X-Trans, uncompressed and compressed). `probe` and `decode` fill a luce-raster
 ## `Raster` with three float channels, R, G and B, in linear sRGB where the
 ## sensor's white level after white balance is 1.0 (times the file's baseline

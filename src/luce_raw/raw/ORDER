@@ -5,6 +5,12 @@ ljpeg.lucb
 meta.lucb
 dng.lucb
 canon.lucb
+cr3.lucb
+crx_lines.lucb
+crx_top.lucb
+crx_wavelet.lucb
+crx_image.lucb
+crx_decode.lucb
 nikon.lucb
 sony.lucb
 olympus.lucb

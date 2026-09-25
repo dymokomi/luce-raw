@@ -28,6 +28,7 @@ enum Coding:
     packed_little
     words
     fuji
+    crx
 
 ## The color facts of a camera: DNG's two calibrated matrices and their
 ## illuminants, or one D65 matrix from the table. Matrices are row-major 3×3;
@@ -68,6 +69,7 @@ struct Meta:
     var extra: const u8[]
     var flags: u64
     var slices: usize[3]
+    var crx: CrxHeader
     var curve: u16[]
     # Layout: the active area within the sensor, the default crop within the
     # active area, and the filter colors from the active area's corner: parsers

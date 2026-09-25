@@ -1,0 +1,196 @@
+#==============================================================================================
+#
+#   raw/crx_lines - CRX: decoding one line of a subband
+#
+#   DESCRIPTION:
+#       Canon's CRX codes each subband line by line: an adaptive Golomb-Rice code
+#       (`k` bits after a unary prefix, `k` adapting to the magnitudes seen), run
+#       lengths for stretches where the neighbourhood is flat, and a median-style
+#       prediction from the line above. Lines without a reference line (wavelet
+#       detail bands) and "rounded" lines (partially decodable subbands) have
+#       their own variants. This follows LibRaw's crx.cpp; its moving line
+#       pointers are indices `l0`, `l1` and `l2` into the line buffers here.
+#
+#==============================================================================================
+
+let crx_run_steps: u32[32] = [1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 8, 8, 8, 8, 0x10, 0x10, 0x20, 0x20, 0x40, 0x40, 0x80, 0x80, 0x100, 0x200, 0x400, 0x800, 0x1000, 0x2000, 0x4000, 0x8000]
+let crx_run_bits: u32[32] = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+## One subband's decoding state (LibRaw's CrxBandParam): its bit stream,
+## two lines of `width` + 2 values (`data`), and for bands decoded without a
+## reference line, the per-column `k` of the previous line (`progress`).
+struct CrxLine:
+    var reader: Bits
+    var width: i32
+    var height: i32
+    var rounded_mask: i32
+    var rounded_bits: i32
+    var line: i32
+    var s: i32
+    var k: i32
+    var data: i32[]
+    var progress: i32[]
+    var partial: bool
+    var l0: i64
+    var l1: i64
+    var l2: i64
+
+    mutating func close():
+        if self.data.length > 0:
+            free(self.data) in memory.heap
+        if self.progress.length > 0:
+            free(self.progress) in memory.heap
+        self = CrxLine()
+
+inline func crx_get(p: const CrxLine*, at: i64) -> i32:
+    return p.data[(usize)at]
+
+inline func crx_set(p: CrxLine*, at: i64, value: i32):
+    p.data[(usize)at] = value
+
+## The next adaptive Golomb-Rice code.
+func crx_code(p: CrxLine*) -> u32!:
+    var code = (u32)(try fuji_zeros(&p.reader))
+    if code >= 41:
+        code = (u32)(try fuji_read(&p.reader, 21))
+    elif p.k > 0:
+        code = (u32)(try fuji_read(&p.reader, p.k)) | (code << (u32)p.k)
+    return code
+
+inline func crx_bit(value: bool) -> i64:
+    return 1 if value else 0
+
+## The signed value a code stands for.
+inline func crx_signed(code: u32) -> i32:
+    return -(i32)(code & 1) ^ (i32)(code >> 1)
+
+## LibRaw's crxPredictKParameter.
+inline func crx_predict_k(previous: i32, code: u32, top: i32) -> i32:
+    let shifted = code >> (u32)previous
+    let next = previous - (1 if code < ((u32)1 << (u32)previous >> 1) else 0) + (1 if shifted > 2 else 0) + (1 if shifted > 5 else 0)
+    return next if top == 0 or next < top else top
+
+## The length of a run of repeated values, at most `length`; LibRaw's run
+## coding with its adaptive step `s`.
+func crx_run(p: CrxLine*, length: i32) -> i32!:
+    var count: i32 = 0
+    if try fuji_read(&p.reader, 1) == 0:
+        return 0
+    count = 1
+    while try fuji_read(&p.reader, 1) != 0:
+        count += (i32)crx_run_steps[(usize)p.s]
+        if count > length:
+            count = length
+            break
+        if p.s < 31:
+            p.s += 1
+        if count == length:
+            break
+    if count < length:
+        if crx_run_bits[(usize)p.s] > 0:
+            count += try fuji_read(&p.reader, (i32)crx_run_bits[(usize)p.s])
+        if p.s > 0:
+            p.s -= 1
+        if count > length:
+            error(corrupt, "CR3 run length overruns its line")
+    return count
+
+## One symbol with (optionally) median prediction from the line above.
+func crx_symbol(p: CrxLine*, median: bool, not_end: bool) -> !:
+    let l0 = p.l0
+    let l1 = p.l1
+    if median:
+        let delta = crx_get(p, l0 + 1) - crx_get(p, l0)
+        let left = crx_get(p, l1)
+        let options: i32[4] = [delta + left, delta + left, left, crx_get(p, l0 + 1)]
+        let index = crx_bit((crx_get(p, l0) < left) != (delta < 0)) * 2 + crx_bit((left < crx_get(p, l0 + 1)) != (delta < 0))
+        crx_set(p, l1 + 1, options[(usize)index])
+    else:
+        crx_set(p, l1 + 1, crx_get(p, l0 + 1))
+    var code = try crx_code(p)
+    crx_set(p, l1 + 1, crx_get(p, l1 + 1) +% crx_signed(code))
+    if not_end:
+        let next = (crx_get(p, l0 + 2) - crx_get(p, l0 + 1)) << 1
+        code = (u32)(((u64)code + (u64)(next if next >= 0 else -next)) >> 1)
+        p.l0 += 1
+    p.k = crx_predict_k(p.k, code, 15)
+    p.l1 += 1
+
+## A line with a reference line above: LibRaw's crxDecodeLine.
+func crx_line(p: CrxLine*) -> !:
+    var length = p.width
+    crx_set(p, p.l1, crx_get(p, p.l0 + 1))
+    while length > 1:
+        if crx_get(p, p.l1) != crx_get(p, p.l0 + 1) or crx_get(p, p.l1) != crx_get(p, p.l0 + 2):
+            try crx_symbol(p, true, true)
+        else:
+            let count = try crx_run(p, length)
+            length -= count
+            p.l0 += (i64)count
+            for _ in 0..<count:
+                crx_set(p, p.l1 + 1, crx_get(p, p.l1))
+                p.l1 += 1
+            if length > 0:
+                try crx_symbol(p, false, length > 1)
+        length -= 1
+    if length == 1:
+        try crx_symbol(p, true, false)
+    crx_set(p, p.l1 + 1, crx_get(p, p.l1) +% 1)
+
+## One symbol of a rounded (partially decodable) line.
+func crx_rounded_symbol(p: CrxLine*, predict: bool, update: bool) -> !:
+    let l0 = p.l0
+    let l1 = p.l1
+    var predicted = crx_get(p, l0 + 1)
+    if predict:
+        let delta = crx_get(p, l0 + 1) - crx_get(p, l0)
+        let left = crx_get(p, l1)
+        let options: i32[4] = [delta + left, delta + left, left, crx_get(p, l0 + 1)]
+        predicted = options[(usize)(crx_bit((crx_get(p, l0) < left) != (delta < 0)) * 2 + crx_bit((left < crx_get(p, l0 + 1)) != (delta < 0)))]
+    let code = try crx_code(p)
+    let value = crx_signed(code)
+    crx_set(p, l1 + 1, p.rounded_mask *% 2 *% value +% (value >> 31) +% predicted)
+    if update:
+        let next = crx_get(p, l0 + 2)
+        let here = crx_get(p, l0 + 1)
+        let step = (next - here + p.rounded_mask - 1) >> p.rounded_bits if next > here else -((here - next + p.rounded_mask) >> p.rounded_bits)
+        p.k = crx_predict_k(p.k, (u32)(((u64)code + 2 * (u64)(step if step >= 0 else -step)) >> 1), 15)
+    else:
+        p.k = crx_predict_k(p.k, code, 15)
+    p.l1 += 1
+
+inline func crx_abs(value: i32) -> i32:
+    return value if value >= 0 else -value
+
+## A rounded line with a reference line above: crxDecodeLineRounded.
+func crx_rounded_line(p: CrxLine*) -> !:
+    var reached = false
+    crx_set(p, p.l0, crx_get(p, p.l0 + 1))
+    crx_set(p, p.l1, crx_get(p, p.l0 + 1))
+    var length = p.width
+    while length > 1:
+        if crx_abs(crx_get(p, p.l0 + 2) - crx_get(p, p.l0 + 1)) > p.rounded_mask:
+            try crx_rounded_symbol(p, true, true)
+            p.l0 += 1
+            reached = true
+        elif reached or crx_abs(crx_get(p, p.l0) - crx_get(p, p.l1)) > p.rounded_mask:
+            try crx_rounded_symbol(p, true, true)
+            p.l0 += 1
+            reached = false
+        else:
+            let count = try crx_run(p, length)
+            length -= count
+            p.l0 += (i64)count
+            for _ in 0..<count:
+                crx_set(p, p.l1 + 1, crx_get(p, p.l1))
+                p.l1 += 1
+            if length > 1:
+                try crx_rounded_symbol(p, false, true)
+                p.l0 += 1
+                reached = crx_abs(crx_get(p, p.l0 + 1) - crx_get(p, p.l0)) > p.rounded_mask
+            elif length == 1:
+                try crx_rounded_symbol(p, false, false)
+        length -= 1
+    if length == 1:
+        try crx_rounded_symbol(p, true, false)
+    crx_set(p, p.l1 + 1, crx_get(p, p.l1) +% 1)

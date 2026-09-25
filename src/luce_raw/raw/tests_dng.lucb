@@ -222,10 +222,10 @@ test "recognize knows raws this package cannot develop, and probe names them":
     var plain = try tiff.write(b"")
     defer plain.close()
     assert(not recognize(plain.view()), "a Canon-made plain TIFF was taken for a raw")
-    let cr3 = b"\x00\x00\x00\x18ftypcrx \x00\x00\x00\x01crx isom"
-    assert(recognize(cr3) and not detect(cr3), "a CR3 was not recognized as an undevelopable raw")
+    let crw = b"II\x1a\x00\x00\x00HEAPCCDR\x00\x00\x01\x00"
+    assert(recognize(crw) and not detect(crw), "a CRW was not recognized as an undevelopable raw")
     var message = ""
-    discard(info(cr3) catch failure:
+    discard(info(crw) catch failure:
         message = failure.message
         recover Info())
-    assert(message == "Canon CR3 raws are not supported yet", "a CR3 did not fail with its own message")
+    assert(message == "Canon CRW raws are not supported", "a CRW did not fail with its own message")

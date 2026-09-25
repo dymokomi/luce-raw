@@ -1,0 +1,285 @@
+#==============================================================================================
+#
+#   raw/crx_image - CRX: tiles, planes, subbands and their headers
+#
+#   DESCRIPTION:
+#       A CRX picture is four planes (the 2×2 filter positions) in tiles; each
+#       tile's plane is one subband (lossless) or a wavelet of 3 × levels + 1
+#       subbands, each an independent bit stream. The picture header lists the
+#       tiles, planes and subbands with their sizes and quantization; version
+#       0x200 adds per-tile quantization tables, themselves Golomb coded. This
+#       reads the headers as LibRaw's crxReadImageHeaders and crxProcessSubbands
+#       do and lays the geometry of every subband out.
+#
+#==============================================================================================
+
+let crx_extra: i32[144] = [
+    1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0,
+    0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0,
+    0, 0, 1, 2, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 2, 2,
+    1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 2, 2, 2, 2, 1, 1, 1,
+    1, 2, 2, 1, 1, 1, 1, 2, 2, 1, 1, 0, 1, 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+let crx_steps: i32[8] = [0x28, 0x2d, 0x33, 0x39, 0x40, 0x48, 0, 0]
+
+## One subband: its size, where its stream is, its quantization, the add-ons
+## at tile edges, and while decoding, its line buffer and decoder.
+struct CrxBand:
+    var width: i32
+    var height: i32
+    var offset: u64
+    var size: u64
+    var q: i32
+    var k: i32
+    var q_base: i32
+    var q_mult: u32
+    var partial: bool
+    var row_start: i32
+    var row_end: i32
+    var col_start: i32
+    var col_end: i32
+    var level_shift: i32
+    var buffer: i32[]
+    var coder: CrxLine
+
+## One plane of one tile.
+struct CrxComponent:
+    var bands: CrxBand[10]
+    var wavelets: CrxWavelet[3]
+    var offset: u64
+    var size: u64
+    var partial: bool
+    var rounded_mask: i32
+    var flags: u32
+
+## A level's quantization steps.
+struct CrxQuant:
+    var steps: u32[]
+    var width: i32
+    var height: i32
+
+## One tile.
+struct CrxTile:
+    var flags: u32
+    var width: i32
+    var height: i32
+    var offset: u64
+    var size: u64
+    var qp_size: u64
+    var extra: u64
+    var has_qp: bool
+    var table: u32[]
+    var quant: CrxQuant[3]
+    var components: CrxComponent[4]
+
+## The picture being decoded.
+struct CrxImage:
+    var header: CrxHeader
+    var plane_width: usize
+    var plane_height: usize
+    var columns: usize
+    var rows: usize
+    var levels: usize
+    var bands: usize
+    var tiles: CrxTile[]
+    var data: const u8[]
+
+    mutating func close():
+        for i in 0..<self.tiles.length:
+            if self.tiles[i].table.length > 0:
+                free(self.tiles[i].table) in memory.heap
+        if self.tiles.length > 0:
+            free(self.tiles) in memory.heap
+        self = CrxImage()
+
+## The picture header of `sample` (the track's data): tile geometry, then every
+## tile's, plane's and subband's header.
+func crx_image(header: CrxHeader, sample: const u8[]) -> CrxImage!:
+    if sample.length < header.header_size:
+        error(corrupt, "CR3 picture header is truncated")
+    var image = CrxImage(header = header)
+    errdefer image.close()
+    image.plane_width = header.width // 2
+    image.plane_height = header.height // 2
+    let tw = header.tile_width // 2
+    let th = header.tile_height // 2
+    if tw < 0x16 or th < 0x16 or image.plane_width > 0x7fff or image.plane_height > 0x7fff:
+        error(corrupt, "CR3 tiles are too small or the picture too large")
+    image.columns = (image.plane_width + tw - 1) // tw
+    image.rows = (image.plane_height + th - 1) // th
+    if image.columns > 255 or image.rows > 255 or image.plane_width - tw * (image.columns - 1) < 0x16 or image.plane_height - th * (image.rows - 1) < 0x16:
+        error(corrupt, "CR3 tile grid is invalid")
+    image.levels = header.levels
+    image.bands = 3 * image.levels + 1
+    image.data = sample[header.header_size..]
+    let count = image.columns * image.rows
+    image.tiles = try new CrxTile[count] in memory.heap
+    for t in 0..<count:
+        let tile = &image.tiles[t]
+        if (t + 1) % image.columns != 0:
+            tile.width = (i32)tw
+            if image.columns > 1:
+                tile.flags = crx_right | (crx_left if t % image.columns != 0 else 0)
+        else:
+            tile.width = (i32)(image.plane_width - tw * (image.columns - 1))
+            if image.columns > 1:
+                tile.flags = crx_left
+        if t < count - image.columns:
+            tile.height = (i32)th
+            if image.rows > 1:
+                tile.flags |= crx_bottom | (crx_top if t >= image.columns else 0)
+        else:
+            tile.height = (i32)(image.plane_height - th * (image.rows - 1))
+            if image.rows > 1:
+                tile.flags |= crx_top
+        for c: usize in 0..<4:
+            tile.components[c].flags = tile.flags
+            tile.components[c].partial = true
+            for b in 0..<image.bands:
+                tile.components[c].bands[b].q = 4
+    var reader = Reader(data = sample[..<header.header_size], little = false)
+    var tile_offset: u64 = 0
+    for t in 0..<count:
+        let tile = &image.tiles[t]
+        let at = reader.position
+        let sign = try reader.uint(2)
+        let size = try reader.uint(2)
+        if (sign != 0xff01 or size != 8) and (sign != 0xff11 or (size != 8 and size != 16)):
+            error(corrupt, "CR3 tile header is invalid")
+        tile.size = try reader.uint(4)
+        if try reader.uint(2) != (u64)t:
+            error(corrupt, "CR3 tile headers are out of order")
+        let tail = try reader.uint(2)
+        if (size == 8 and tail != 0) or (size == 16 and tail != 0x4000):
+            error(corrupt, "CR3 tile header is invalid")
+        tile.offset = tile_offset
+        if size == 16:
+            tile.qp_size = try reader.uint(4)
+            tile.extra = try reader.uint(2)
+            if try reader.uint(2) != 0:
+                error(corrupt, "CR3 tile header is invalid")
+            tile.has_qp = true
+        reader.position = at + (usize)size + 4
+        tile_offset += tile.size
+        var comp_offset: u64 = 0
+        for c: usize in 0..<4:
+            let comp = &tile.components[c]
+            let csign = try reader.uint(2)
+            let csize = try reader.uint(2)
+            if (csign != 0xff02 and csign != 0xff12) or csize != 8:
+                error(corrupt, "CR3 plane header is invalid")
+            comp.size = try reader.uint(4)
+            let flags = try reader.byte()
+            if (usize)(flags >> 4) != c or try reader.uint(3) != 0:
+                error(corrupt, "CR3 plane header is invalid")
+            let rounded = (i32)((flags >> 1) & 3)
+            comp.partial = (flags & 8) != 0
+            comp.offset = comp_offset
+            comp_offset += comp.size
+            if rounded != 0:
+                if image.levels > 0 or not comp.partial:
+                    error(corrupt, "CR3 rounded plane is invalid")
+                comp.rounded_mask = (i32)1 << (rounded - 1)
+            try crx_band_headers(&image, comp, &reader)
+            crx_band_geometry(&image, tile, comp)
+    if header.version == 0x200:
+        for t in 0..<count:
+            if image.tiles[t].has_qp:
+                try crx_quantization(&image, &image.tiles[t])
+    return image
+
+## The subband headers of one plane.
+func crx_band_headers(image: const CrxImage*, comp: CrxComponent*, reader: Reader*) -> !:
+    var offset: u64 = 0
+    for b in 0..<image.bands:
+        let band = &comp.bands[b]
+        let at = reader.position
+        let sign = try reader.uint(2)
+        let size = try reader.uint(2)
+        if (sign != 0xff03 or size != 8) and (sign != 0xff13 or size != 16):
+            error(corrupt, "CR3 subband header is invalid")
+        let total = try reader.uint(4)
+        let number = try reader.byte()
+        if (usize)((number & 0xf0) >> 4) != b:
+            error(corrupt, "CR3 subband headers are out of order")
+        band.offset = offset
+        reader.position = at + 8
+        if sign == 0xff03:
+            let bits = try reader.uint(4)
+            band.size = total -% (bits & 0x7ffff)
+            band.partial = (bits & 0x8000000) != 0
+            band.q = (i32)((bits >> 19) & 0xff)
+        else:
+            if (try reader.uint(2) & 0xfff) != 0:
+                error(unsupported, "CR3 subbands with partial decoding are not supported")
+            band.q_mult = (u32)(try reader.uint(2))
+            band.q_base = (i32)(u32)(try reader.uint(4))
+            band.size = total -% try reader.uint(2)
+            if try reader.uint(2) != 0:
+                error(corrupt, "CR3 subband header is invalid")
+            band.q = 0
+        if band.size > total:
+            error(corrupt, "CR3 subband header is invalid")
+        offset += total
+        reader.position = at + (usize)size + 4
+
+## Band `band`'s add-ons at tile edges (version 0x200 only).
+func crx_band_edges(image: const CrxImage*, band: CrxBand*, level: i32, col_start: i32, col_end: i32, row_start: i32, row_end: i32):
+    if image.header.version == 0x200:
+        band.row_start = row_start
+        band.row_end = row_end
+        band.col_start = col_start
+        band.col_end = col_end
+        band.level_shift = 3 - level
+
+## Every subband's size: crxProcessSubbands.
+func crx_band_geometry(image: const CrxImage*, tile: const CrxTile*, comp: CrxComponent*):
+    var b = image.bands - 1
+    var height = tile.height
+    var width = tile.width
+    let levels = (i32)image.levels
+    var width_extra: i32 = 0
+    var height_extra: i32 = 0
+    if levels > 0:
+        let row_base = (usize)(0x30 * (levels - 1) + 6 * (tile.width & 7))
+        let col_base = (usize)(0x30 * (levels - 1) + 6 * (tile.height & 7))
+        for level: i32 in 0..<levels:
+            let odd_w = width & 1
+            let odd_h = height & 1
+            width = (odd_w + width) >> 1
+            height = (odd_h + height) >> 1
+            var w0: i32 = 0
+            var w1: i32 = 0
+            var h0: i32 = 0
+            var h1: i32 = 0
+            var col_start: i32 = 0
+            var row_start: i32 = 0
+            if (tile.flags & crx_right) != 0:
+                w0 = crx_extra[row_base + (usize)(2 * level)]
+                w1 = crx_extra[row_base + (usize)(2 * level + 1)]
+            if (tile.flags & crx_left) != 0:
+                w0 += 1
+                col_start = 1
+            if (tile.flags & crx_bottom) != 0:
+                h0 = crx_extra[col_base + (usize)(2 * level)]
+                h1 = crx_extra[col_base + (usize)(2 * level + 1)]
+            if (tile.flags & crx_top) != 0:
+                h0 += 1
+                row_start = 1
+            comp.bands[b].width = width + w0 - odd_w
+            comp.bands[b].height = height + h0 - odd_h
+            crx_band_edges(image, &comp.bands[b], level + 1, col_start, w0 - col_start, row_start, h0 - row_start)
+            comp.bands[b - 1].width = width + w1
+            comp.bands[b - 1].height = height + h0 - odd_h
+            crx_band_edges(image, &comp.bands[b - 1], level + 1, 0, w1, row_start, h0 - row_start)
+            comp.bands[b - 2].width = width + w0 - odd_w
+            comp.bands[b - 2].height = height + h1
+            crx_band_edges(image, &comp.bands[b - 2], level + 1, col_start, w0 - col_start, 0, h1)
+            b -= 3
+        if (tile.flags & crx_right) != 0:
+            width_extra = crx_extra[row_base + (usize)(2 * levels - 1)]
+        if (tile.flags & crx_bottom) != 0:
+            height_extra = crx_extra[col_base + (usize)(2 * levels - 1)]
+    comp.bands[b].width = width_extra + width
+    comp.bands[b].height = height_extra + height
+    if levels > 0:
+        crx_band_edges(image, &comp.bands[b], levels, 0, width_extra, 0, height_extra)

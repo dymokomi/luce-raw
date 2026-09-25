@@ -49,6 +49,7 @@ func unpack(file: const u8[], meta: const Meta*, threads: usize) -> Mosaic!:
         .packed_little: try unpack_packed_little(file, meta, &mosaic)
         .words: try unpack_words(file, meta, &mosaic)
         .fuji: try unpack_fuji(file, meta, &mosaic, threads)
+        .crx: try unpack_crx(file, meta, &mosaic, threads)
         .unknown: error(unsupported, "raw sample coding is not supported")
     if meta.curve.length == 65536:
         for i in 0..<mosaic.data.length:

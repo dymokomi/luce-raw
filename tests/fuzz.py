@@ -5,7 +5,7 @@ Each round truncates a sample or overwrites bytes in its first 256 KiB (where th
 headers, directories and maker notes live) or in its sensor data, then runs the
 driver's `sensor` (parse and unpack) and `develop` (the whole pipeline, fast
 mode) on it. An error exit is fine; a trap or a signal is a failure.
-Usage: fuzz.py [ROUNDS_PER_SAMPLE] [SEED]
+Usage: fuzz.py [ROUNDS_PER_SAMPLE] [SEED] [SAMPLE...]
 """
 import json, random, subprocess, sys, tempfile
 from pathlib import Path
@@ -26,6 +26,8 @@ def main():
     rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 20
     rng = random.Random(int(sys.argv[2]) if len(sys.argv) > 2 else 1)
     manifest = json.loads((ROOT / "tests/samples.json").read_text())
+    if len(sys.argv) > 3:
+        manifest = [entry for entry in manifest if entry["name"] in sys.argv[3:]]
     failures = []
     with tempfile.TemporaryDirectory() as tmp:
         case, out = Path(tmp) / "case.raw", str(Path(tmp) / "out")

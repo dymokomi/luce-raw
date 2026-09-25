@@ -1,0 +1,191 @@
+#==============================================================================================
+#
+#   raw/crx_wavelet - CRX: the inverse 5/3 wavelet
+#
+#   DESCRIPTION:
+#       Lossy CR3 ("C-RAW") planes are up to three levels of LeGall 5/3 wavelets.
+#       Each level rebuilds lines of the next finer level from its four subbands,
+#       lifting horizontally (crx_row) and then vertically through a ring of five
+#       line buffers. Tiles that touch neighbours use the neighbours' overlap
+#       (the tile flags). This is LibRaw's crxIdwt53Filter*, with its line
+#       buffer pointers as indices into each level's storage, so their swaps
+#       (one of which leaves two entries naming the same buffer) carry over.
+#
+#==============================================================================================
+
+let crx_right: u32 = 1
+let crx_left: u32 = 2
+let crx_bottom: u32 = 4
+let crx_top: u32 = 8
+
+## One level's inverse transform state.
+struct CrxWavelet:
+    var band0: i32[]
+    var band1: i32[]
+    var band2: i32[]
+    var band3: i32[]
+    var storage: i32[]
+    var line: usize[8]
+    var width: i32
+    var height: i32
+    var cur_line: i32
+    var cur_h: i32
+    var tap: i32
+
+    ## Line buffer `index` (0 to 7) as a span.
+    func buffer(index: usize) -> i32[]:
+        let at = self.line[index] * (usize)self.width
+        return self.storage[at..<at + (usize)self.width]
+
+    mutating func close():
+        if self.storage.length > 0:
+            free(self.storage) in memory.heap
+        self = CrxWavelet()
+
+## Lift one line horizontally from low band `even` and high band `odd` into
+## `out` (LibRaw's repeated "process L band" code). `always_last` writes the
+## final difference even for an even width, as one of LibRaw's copies does.
+func crx_row(out: i32[], even: const i32[], odd: const i32[], width: i32, flags: u32, always_last: bool):
+    if width <= 1:
+        out[0] = even[0]
+        return
+    var e: usize = 0
+    var o: usize = 0
+    var a: usize = 0
+    if (flags & crx_left) != 0:
+        out[0] = even[0] - ((odd[0] + odd[1] + 2) >> 2)
+        o += 1
+    else:
+        out[0] = even[0] - ((odd[0] + 1) >> 1)
+    e += 1
+    var i: i32 = 0
+    while i < width - 3:
+        let delta = even[e] - ((odd[o] + odd[o + 1] + 2) >> 2)
+        out[a + 1] = odd[o] + ((delta + out[a]) >> 1)
+        out[a + 2] = delta
+        e += 1
+        o += 1
+        a += 2
+        i += 2
+    if (flags & crx_right) != 0:
+        let delta = even[e] - ((odd[o] + odd[o + 1] + 2) >> 2)
+        out[a + 1] = odd[o] + ((delta + out[a]) >> 1)
+        if ((width & 1) != 0 or always_last) and a + 2 < out.length:
+            out[a + 2] = delta
+    elif (width & 1) != 0:
+        let delta = even[e] - ((odd[o] + 1) >> 1)
+        out[a + 1] = odd[o] + ((delta + out[a]) >> 1)
+        out[a + 2] = delta
+    else:
+        out[a + 1] = out[a] + odd[o]
+
+## The next finished line of `level`: LibRaw's crxIdwt53FilterGetLine.
+func crx_get_line(comp: CrxComponent*, level: usize) -> i32[]:
+    let w = &comp.wavelets[level]
+    let result = w.buffer((usize)((w.tap - w.cur_h + 5) % 5 + 3))
+    w.cur_h -= 1
+    return result
+
+## Decode the subband lines `level` needs next: crxIdwt53FilterDecode.
+func crx_filter_decode(image: const CrxImage*, tile: const CrxTile*, comp: CrxComponent*, level: usize) -> !:
+    let w = &comp.wavelets[level]
+    if w.cur_h != 0:
+        return
+    let first = 3 * level
+    if w.height - 3 <= w.cur_line and (comp.flags & crx_bottom) == 0:
+        if (w.height & 1) != 0:
+            if level > 0:
+                try crx_filter_decode(image, tile, comp, level - 1)
+            else:
+                try crx_band_line(image, tile, comp, first, level)
+            try crx_band_line(image, tile, comp, first + 1, level)
+    else:
+        if level > 0:
+            try crx_filter_decode(image, tile, comp, level - 1)
+        else:
+            try crx_band_line(image, tile, comp, first, level)
+        try crx_band_line(image, tile, comp, first + 1, level)
+        try crx_band_line(image, tile, comp, first + 2, level)
+        try crx_band_line(image, tile, comp, first + 3, level)
+
+## Produce the next lines of `level`: crxIdwt53FilterTransform.
+func crx_filter_transform(comp: CrxComponent*, level: usize) -> !:
+    let w = &comp.wavelets[level]
+    if w.cur_h != 0:
+        return
+    let flags = comp.flags
+    let tap = (usize)w.tap
+    if w.cur_line >= w.height - 3:
+        if (flags & crx_bottom) != 0:
+            return
+        if (w.height & 1) != 0:
+            if level > 0:
+                if comp.wavelets[level - 1].cur_h == 0:
+                    try crx_filter_transform(comp, level - 1)
+                w.band0 = crx_get_line(comp, level - 1)
+            let h0 = w.line[tap + 3]
+            let h1 = w.line[(tap + 1) % 5 + 3]
+            let h2 = w.line[(tap + 2) % 5 + 3]
+            let l0 = w.line[0]
+            let l1 = w.line[1]
+            w.line[1] = w.line[2]
+            w.line[2] = l1
+            crx_row(crx_span(w, l0), w.band0, w.band1, w.width, flags, false)
+            let a = crx_span(w, w.line[0])
+            let b = crx_span(w, w.line[1])
+            let o0 = crx_span(w, h0)
+            let o1 = crx_span(w, h1)
+            let o2 = crx_span(w, h2)
+            for i in 0..<(usize)w.width:
+                let delta = a[i] - ((b[i] + 1) >> 1)
+                o1[i] = b[i] + ((delta + o0[i]) >> 1)
+                o2[i] = delta
+            w.cur_h += 3
+            w.cur_line += 3
+            w.tap = (w.tap + 3) % 5
+        else:
+            let l2 = w.line[2]
+            let h0 = crx_span(w, w.line[tap + 3])
+            let h1 = crx_span(w, w.line[(tap + 1) % 5 + 3])
+            # As LibRaw: lines 1 and 2 both end up naming the old line 2.
+            w.line[1] = l2
+            w.line[2] = w.line[1]
+            let c = crx_span(w, l2)
+            for i in 0..<(usize)w.width:
+                h1[i] = h0[i] + c[i]
+            w.cur_h += 2
+            w.cur_line += 2
+            w.tap = (w.tap + 2) % 5
+        return
+    if level > 0:
+        if comp.wavelets[level - 1].cur_h == 0:
+            try crx_filter_transform(comp, level - 1)
+        w.band0 = crx_get_line(comp, level - 1)
+    let l0 = w.line[0]
+    let l1 = w.line[1]
+    let h0 = w.line[tap + 3]
+    let h1 = w.line[(tap + 1) % 5 + 3]
+    let h2 = w.line[(tap + 2) % 5 + 3]
+    w.line[1] = w.line[2]
+    w.line[2] = l1
+    crx_row(crx_span(w, l0), w.band0, w.band1, w.width, flags, false)
+    crx_row(crx_span(w, l1), w.band2, w.band3, w.width, flags, false)
+    let a = crx_span(w, w.line[0])
+    let b = crx_span(w, w.line[1])
+    let c = crx_span(w, w.line[2])
+    let o0 = crx_span(w, h0)
+    let o1 = crx_span(w, h1)
+    let o2 = crx_span(w, h2)
+    for i in 0..<(usize)w.width:
+        let delta = a[i] - ((c[i] + b[i] + 2) >> 2)
+        o1[i] = b[i] + ((delta + o0[i]) >> 1)
+        o2[i] = delta
+    let step: i32 = 3 if w.cur_line >= w.height - 3 and (w.height & 1) != 0 else 2
+    w.cur_h += step
+    w.cur_line += step
+    w.tap = (w.tap + step) % 5
+
+## Buffer `index` of a level's storage.
+inline func crx_span(w: const CrxWavelet*, index: usize) -> i32[]:
+    let at = index * (usize)w.width
+    return w.storage[at..<at + (usize)w.width]

@@ -160,5 +160,35 @@
   "url": "https://raw.pixls.us/data/Olympus/E-M1MarkII/Olympus_EM1mk2_Standard_20MP.ORF",
   "sha256": "4bc52d99e4fbf2f09335a3301a4634bc261a98441edb824434ec069f7026cd71",
   "camera": "Olympus E-M1 Mark II"
+ },
+ {
+  "name": "canon_250d_craw.cr3",
+  "url": "https://raw.pixls.us/getfile.php/3383/nice/Canon%20-%20EOS%20250D%20-%20C-RAW%20(3:2).CR3",
+  "sha256": "69bdd267defb3d676f41f62a5e5ea65651669a04191cf4e89740917c59cedbcc",
+  "camera": "Canon EOS 250D"
+ },
+ {
+  "name": "canon_250d.cr3",
+  "url": "https://raw.pixls.us/getfile.php/3387/nice/Canon%20-%20EOS%20250D%20-%20RAW%20(3:2).CR3",
+  "sha256": "ed1bd1bb8dbcf31735fbe52eeabdbd3a32236eda9cb20b132e8847cb0d89517f",
+  "camera": "Canon EOS 250D"
+ },
+ {
+  "name": "canon_eosr.cr3",
+  "url": "https://raw.pixls.us/getfile.php/4515/nice/Canon%20-%20EOS%20R%20-%203:2.CR3",
+  "sha256": "89bd55532b0cceb5efa360e97827ba35c2076bce0de4675f3a4413a883dac880",
+  "camera": "Canon EOS R"
+ },
+ {
+  "name": "canon_r5.cr3",
+  "url": "https://raw.pixls.us/getfile.php/4698/nice/Canon%20-%20EOS%20R5%20-%203:2.CR3",
+  "sha256": "2deae46b816e56ba91ae7a3892ca121290e12d5b22afb11f5b05a3d8f09f759f",
+  "camera": "Canon EOS R5"
+ },
+ {
+  "name": "canon_r6m2.cr3",
+  "url": "https://raw.pixls.us/getfile.php/6402/nice/Canon%20-%20EOS%20R6%20Mark%20II%20-%203:2.cr3",
+  "sha256": "1a93f96556aabbc4a7260750ab0a191ec7926bb978fe8428bf3465121da730d6",
+  "camera": "Canon EOS R6 Mark II"
  }
 ]
