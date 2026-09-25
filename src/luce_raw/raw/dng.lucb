@@ -37,7 +37,7 @@ struct Tree:
         var offset = first + base
         var chain: usize = 0
         while offset != 0 and chain < 16:
-            let directory = try Directory.open(file, base, offset, little)
+            let directory = try Directory.open(file, (i64)base, offset, little)
             try tree.add(directory)
             chain += 1
             offset = try directory.next()

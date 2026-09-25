@@ -75,17 +75,18 @@ struct Entry:
                 return ""
         return (str)self.data[..<end]
 
-## One directory: `count` twelve-byte (or twenty-byte, BigTIFF-free here)
-## entries at `offset`, value offsets counted from `base`.
+## One directory: `count` twelve-byte entries at `offset` of `file`; a value
+## offset `v` stored in it lies at `base + v` of `file`. `base` is negative for
+## a directory copied out of the file whose offsets still count from the file.
 struct Directory:
     var file: const u8[]
-    var base: usize
+    var base: i64
     var offset: usize
     var count: usize
     var little: bool = true
 
     ## The directory at `offset` of `file`, checked to lie inside it.
-    static func open(file: const u8[], base: usize, offset: usize, little: bool) -> Directory!:
+    static func open(file: const u8[], base: i64, offset: usize, little: bool) -> Directory!:
         var reader = Reader(data = file, position = offset, little = little)
         let count = (usize)(try reader.uint(2))
         if count == 0 or count > 4096:
@@ -107,7 +108,7 @@ struct Directory:
         if bytes <= 4:
             return Entry(tag = tag, kind = kind, count = (usize)count, data = inline[..<(usize)bytes], little = self.little, position = here)
         var pointer = Reader(data = inline, little = self.little)
-        let at = (u64)self.base + try pointer.uint(4)
+        let at = try self.locate(try pointer.uint(4))
         return Entry(tag = tag, kind = kind, count = (usize)count, data = try binary.slice(self.file, at, bytes), little = self.little, position = (usize)at)
 
     ## The tag's entry, or none when the directory lacks it.
@@ -142,15 +143,19 @@ struct Directory:
     func next() -> usize!:
         var reader = Reader(data = self.file, position = self.offset + 2 + self.count * 12, little = self.little)
         let link = try reader.uint(4)
-        return 0 if link == 0 else (usize)link + self.base
+        return 0 if link == 0 else (usize)(try self.locate(link))
 
     ## A directory an entry of this one points to, such as the EXIF directory or
     ## a SubIFD; its offsets share this directory's base.
     func child(offset: u64) -> Directory!:
-        let at = (u64)self.base + offset
-        if at >= (u64)self.file.length:
-            error(corrupt, "TIFF child directory outside file")
-        return try Directory.open(self.file, self.base, (usize)at, self.little)
+        return try Directory.open(self.file, self.base, (usize)(try self.locate(offset)), self.little)
+
+    ## Where value offset `offset` lies in the file.
+    func locate(offset: u64) -> u64!:
+        let at = self.base + (i64)(offset & 0xffffffff)
+        if at < 0 or at >= (i64)self.file.length:
+            error(corrupt, "TIFF offset lies outside the file")
+        return (u64)at
 
 ## A TIFF header's byte order and first directory offset, at `start` of `file`.
 func tiff_header(file: const u8[], start: usize) -> (bool, usize)!:

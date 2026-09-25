@@ -1,0 +1,198 @@
+#==============================================================================================
+#
+#   raw/nikon - Nikon NEF
+#
+#   DESCRIPTION:
+#       A NEF is a TIFF with the raw in a SubIFD. Compression 34713 is Nikon's own
+#       coding: Huffman-coded differences from the pixel two columns left (and, in
+#       the first two columns, two rows up), with a linearization curve and initial
+#       predictors in the maker note (tag 0x96). Lossy NEFs switch code trees at a
+#       split row. Uncompressed NEFs use the DNG strip path. The maker note is a TIFF
+#       of its own after a "Nikon" header; it holds the white balance (0x0c) and,
+#       on newer bodies, the black level (0x3d).
+#
+#==============================================================================================
+
+## Nikon's code trees, dcraw's `nikon_tree`: sixteen code-length counts, then
+## the symbols (low nibble: difference bits; high nibble: bits left implied).
+## Rows: 12-bit lossy, 12-bit lossy after split, 12-bit lossless, 14-bit lossy,
+## 14-bit lossy after split, 14-bit lossless.
+let nikon_trees: u8[192] = [
+    0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 5, 4, 3, 6, 2, 7, 1, 0, 8, 9, 11, 10, 12, 0, 0, 0,
+    0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0x39, 0x5a, 0x38, 0x27, 0x16, 5, 4, 3, 2, 1, 0, 11, 12, 12, 0, 0,
+    0, 1, 4, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 4, 6, 3, 7, 2, 8, 1, 9, 0, 10, 11, 12, 0, 0, 0,
+    0, 1, 4, 3, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 5, 6, 4, 7, 8, 3, 9, 2, 1, 0, 10, 11, 12, 13, 14, 0,
+    0, 1, 5, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 8, 0x5c, 0x4b, 0x3a, 0x29, 7, 6, 5, 4, 3, 2, 1, 0, 13, 14, 0,
+    0, 1, 4, 2, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 7, 6, 8, 5, 9, 4, 10, 3, 11, 12, 2, 0, 1, 13, 14, 0]
+
+## Models whose sensors carry masked or unused columns: model, columns
+## dropped on the right, and left margin, after LibRaw.
+struct NikonCrop:
+    var model: str
+    var right: u8
+    var left: u8
+
+let nikon_crops: NikonCrop[18] = [
+    NikonCrop(model = "D3", right = 2, left = 2), NikonCrop(model = "D3S", right = 2, left = 2), NikonCrop(model = "D700", right = 2, left = 2),
+    NikonCrop(model = "D3100", right = 22, left = 6), NikonCrop(model = "D5000", right = 42, left = 0), NikonCrop(model = "D90", right = 42, left = 0),
+    NikonCrop(model = "D5100", right = 44, left = 0), NikonCrop(model = "D7000", right = 44, left = 0), NikonCrop(model = "COOLPIX A", right = 44, left = 0),
+    NikonCrop(model = "D3200", right = 46, left = 0), NikonCrop(model = "D600", right = 46, left = 0), NikonCrop(model = "D610", right = 46, left = 0),
+    NikonCrop(model = "D800", right = 46, left = 0), NikonCrop(model = "D800E", right = 46, left = 0), NikonCrop(model = "D4", right = 50, left = 2),
+    NikonCrop(model = "Df", right = 50, left = 2), NikonCrop(model = "D300", right = 32, left = 0), NikonCrop(model = "D300S", right = 32, left = 0)]
+
+## Fill `meta` from a Nikon NEF.
+func parse_nef(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
+    meta.format = "NEF"
+    let model = table_model(meta.make, meta.model)
+    meta.model = model
+    meta.orientation = try (try tree.at(0)).uint(274, 1)
+    let raw = try dng_raw(tree)
+    meta.raw_width = (usize)(try raw.uint(256))
+    meta.raw_height = (usize)(try raw.uint(257))
+    meta.bits = (usize)(try raw.uint(258, 12))
+    meta.little = raw.little
+    let compression = try raw.uint(259, 1)
+    meta.offsets = try raw.find(273) else error(corrupt, "NEF raw has no strips")
+    meta.counts = try raw.find(279) else error(corrupt, "NEF strips lack byte counts")
+    meta.tile_width = meta.raw_width
+    meta.tile_height = (usize)math.imin((i64)(try raw.uint(278, (u64)meta.raw_height)), (i64)meta.raw_height)
+    var total: u64 = 0
+    for i in 0..<meta.counts.count:
+        total += try meta.counts.uint(i)
+    let pixels = (u64)meta.raw_width * (u64)meta.raw_height
+    if compression == 34713 and total != pixels * 2 and total * 8 != pixels * (u64)meta.bits:
+        meta.coding = .nikon
+        meta.data_offset = (usize)(try meta.offsets.uint(0))
+        meta.data_size = (usize)total
+    elif total == pixels * 2:
+        meta.coding = .unpacked
+        meta.bits = 16
+    elif total * 8 == pixels * (u64)meta.bits:
+        meta.coding = .packed
+    else:
+        error(unsupported, "this NEF compression is not supported")
+    if meta.coding == .unpacked:
+        meta.white = [(f64)(((u64)1 << (u64)(try raw.uint(258, 12))) - 1), 0.0, 0.0]
+    try cfa_from(&raw, meta)
+    for crop in nikon_crops:
+        if model == crop.model:
+            meta.left = (usize)crop.left
+            meta.width = meta.raw_width - (usize)crop.left - (usize)crop.right
+            meta.height = meta.raw_height
+    let exif = tree.exif else error(corrupt, "NEF has no EXIF directory")
+    let note = try exif.find(37500) else error(corrupt, "NEF has no maker note")
+    if note.data.length < 18 or (str)note.data[..<5] != "Nikon":
+        error(unsupported, "NEF maker note has an unknown layout")
+    let (little, first) = try tiff_header(file, note.position + 10)
+    let maker = try Directory.open(file, (i64)(note.position + 10), note.position + 10 + first, little)
+    if let balance = try maker.find(0x0c):
+        if balance.count >= 2:
+            let r = try balance.real(0)
+            let b = try balance.real(1)
+            if r > 0.0 and b > 0.0:
+                meta.neutral = [1.0 / r, 1.0, 1.0 / b]
+                meta.neutral_known = true
+    if let black = try maker.find(0x3d):
+        if black.count == 4:
+            try canonical_black(meta, &black)
+    if meta.coding == .nikon:
+        let table = try maker.find(0x96) else error(corrupt, "compressed NEF lacks its decoding table")
+        meta.extra = table.data
+        meta.flags = 1 if little else 0
+
+## The color filter pattern of a TIFF raw directory (EXIF color codes, from
+## the sensor's corner), made relative to the active area.
+func cfa_from(raw: const Directory*, meta: Meta*) -> !:
+    let pattern = try raw.find(33422) else error(corrupt, "raw directory lacks its color filter pattern")
+    if pattern.count != 4:
+        error(unsupported, "only 2×2 color filter arrays are supported")
+    var codes: u8[4]
+    for i: usize in 0..<4:
+        codes[i] = (u8)(try pattern.uint(i))
+    for p: usize in 0..<4:
+        meta.cfa[p] = codes[((meta.top + p // 2) % 2) * 2 + (meta.left + p % 2) % 2]
+
+## Black levels given in R, G1, G2, B order (G1 on red rows), placed on the
+## active area's 2×2 positions.
+func canonical_black(meta: Meta*, levels: const Entry*) -> !:
+    meta.black_rows = 2
+    meta.black_columns = 2
+    for p: usize in 0..<4:
+        let color = meta.cfa[p]
+        let partner = meta.cfa[p ^ 1]
+        let index: usize = 0 if color == 0 else 3 if color == 2 else 1 if partner == 0 else 2
+        meta.black[p] = try levels.real(index)
+
+## Nikon's Huffman-coded NEF.
+func unpack_nikon(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
+    var header = Reader(data = meta.extra, little = (meta.flags & 1) != 0)
+    let version0 = try header.byte()
+    let version1 = try header.byte()
+    if version0 == 0x49 or version1 == 0x58:
+        discard(try header.take(2110))
+    var tree: usize = 2 if version0 == 0x46 else 0
+    if meta.bits == 14:
+        tree += 3
+    var vertical: u16[4]
+    for i: usize in 0..<4:
+        vertical[i] = (u16)(try header.uint(2))
+    let top = (usize)(((u64)1 << (u64)meta.bits) & 0x7fff)
+    let points = (usize)(try header.uint(2))
+    let step = top // (points - 1) if points > 1 else 0
+    let curve = try new u16[65536] in memory.heap
+    defer free(curve) in memory.heap
+    for i in 0..<curve.length:
+        curve[i] = (u16)i
+    var split: usize = 0
+    if version0 == 0x44 and version1 == 0x20 and step > 0:
+        for i in 0..<points:
+            if i * step < curve.length:
+                curve[i * step] = (u16)(try header.uint(2))
+        for i in 0..<top:
+            let base = i - i % step
+            if base + step < curve.length:
+                curve[i] = (u16)(((u64)curve[base] * (u64)(step - i % step) + (u64)curve[base + step] * (u64)(i % step)) // (u64)step)
+        var at = Reader(data = meta.extra, position = 562, little = header.little)
+        split = (usize)(try at.uint(2))
+    elif version0 != 0x46 and points <= 0x4001:
+        for i in 0..<points:
+            curve[i] = (u16)(try header.uint(2))
+    var huffman = try nikon_huffman(tree)
+    defer huffman.close()
+    var reader = Bits(data = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size))
+    let w = mosaic.width
+    for y in 0..<mosaic.height:
+        if split > 0 and y == split:
+            huffman.close()
+            huffman = try nikon_huffman(tree + 1)
+        var horizontal: u16[2]
+        for x in 0..<w:
+            if reader.count < 32:
+                reader.fill()
+            let entry = huffman.table[(usize)reader.peek(huffman.bits)]
+            if entry == 0:
+                error(corrupt, "invalid Huffman code in NEF data")
+            try reader.skip((u32)(entry >> 8))
+            let symbol = (u32)(entry & 255)
+            let length = symbol & 15
+            let shift = symbol >> 4
+            if shift > length:
+                error(corrupt, "invalid NEF difference code")
+            var delta: i32 = 0
+            if length > 0:
+                delta = ((((i32)(try reader.read(length - shift)) << 1) + 1) << shift) >> 1
+                if (delta & ((i32)1 << (length - 1))) == 0:
+                    delta -= ((i32)1 << length) - (1 if shift == 0 else 0)
+            if x < 2:
+                let v = (y & 1) * 2 + x
+                vertical[v] = vertical[v] +% (u16)delta
+                horizontal[x] = vertical[v]
+            else:
+                horizontal[x & 1] = horizontal[x & 1] +% (u16)delta
+            let value = (i16)horizontal[x & 1]
+            mosaic.data[y * w + x] = curve[(usize)(0 if value < 0 else 0x3fff if value > 0x3fff else value)]
+
+## Nikon code tree `index` as a lookup table.
+func nikon_huffman(index: usize) -> Huffman!:
+    let row = nikon_trees[index * 32..<index * 32 + 32]
+    return try Huffman.build(row[..<16], row[16..])

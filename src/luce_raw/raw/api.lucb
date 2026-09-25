@@ -131,7 +131,6 @@ pub func decode(image: Raster*, options: Options = Options()) -> !:
     var look = try development(&meta, options.temperature, options.tint)
     if options.camera:
         look.to_rgb = diagonal([1.0, 1.0, 1.0])
-        look.to_xyz = rgb_to_xyz(look.to_rgb)
     let threads = options.threads if options.threads > 0 else (usize)os.cpus()
     var mosaic = try unpack(image.encoded, &meta, threads)
     defer mosaic.close()

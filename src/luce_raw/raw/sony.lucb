@@ -1,0 +1,164 @@
+#==============================================================================================
+#
+#   raw/sony - Sony ARW
+#
+#   DESCRIPTION:
+#       An ARW is a TIFF with the raw in a SubIFD: 16-bit words when uncompressed,
+#       or ARW2 blocks when "compressed": sixteen same-color pixels in sixteen bytes,
+#       an 11-bit maximum and minimum with their positions and 7-bit steps above the
+#       minimum, then Sony's tone curve (tag 0x7010) expands the 11 bits to 14. The
+#       white balance and black level sit in the SR2 sub-IFD, encrypted with a key
+#       from the SR2Private directory that IFD0's DNGPrivateData points to.
+#
+#==============================================================================================
+
+## Fill `meta` from a Sony ARW.
+func parse_arw(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
+    meta.format = "ARW"
+    let main = try tree.at(0)
+    meta.orientation = try main.uint(274, 1)
+    let raw = try dng_raw(tree)
+    meta.raw_width = (usize)(try raw.uint(256))
+    meta.raw_height = (usize)(try raw.uint(257))
+    let bits = (usize)(try raw.uint(258, 12))
+    meta.bits = bits
+    meta.little = raw.little
+    let compression = try raw.uint(259, 1)
+    let offsets = try raw.find(273) else error(corrupt, "ARW raw has no strips")
+    let counts = try raw.find(279) else error(corrupt, "ARW strips lack byte counts")
+    meta.data_offset = (usize)(try offsets.uint(0))
+    meta.data_size = (usize)(try counts.uint(0))
+    let pixels = meta.raw_width * meta.raw_height
+    if compression == 32767 and meta.data_size == pixels:
+        meta.coding = .sony_arw2
+        meta.bits = 14
+        try sony_curve(meta, &raw)
+    elif (compression == 1 or compression == 32767) and meta.data_size == pixels * 2:
+        meta.coding = .unpacked
+        meta.offsets = offsets
+        meta.counts = counts
+        meta.tile_width = meta.raw_width
+        meta.tile_height = meta.raw_height
+        meta.bits = 16
+    else:
+        error(unsupported, "this ARW compression is not supported")
+    meta.white = [(f64)(((u64)1 << (u64)(14 if meta.coding == .sony_arw2 else bits)) - 1), 0.0, 0.0]
+    try cfa_from(&raw, meta)
+    if let origin = try raw.find(50719):
+        if let size = try raw.find(50720):
+            if origin.count == 2 and size.count == 2:
+                meta.crop_x = (usize)(try origin.real(0))
+                meta.crop_y = (usize)(try origin.real(1))
+                meta.crop_width = (usize)(try size.real(0))
+                meta.crop_height = (usize)(try size.real(1))
+    # LibRaw's default black when the SR2 data states none.
+    meta.black[0] = 512.0 if meta.coding == .sony_arw2 or bits == 14 else (f64)((u64)128 << (u64)(bits - 12 if bits > 12 else 0))
+    if let private = try main.find(50740):
+        if private.count == 4:
+            var reader = Reader(data = private.data, little = main.little)
+            try sony_private(file, meta, &main, (usize)(try reader.uint(4)))
+
+## Sony's tone curve: slopes 1, 2, 4, 8 and 16 between the four knots of tag
+## 0x7010, expanding ARW2's 12-bit indexes to 14-bit values.
+func sony_curve(meta: Meta*, raw: const Directory*) -> !:
+    let knots = try raw.find(0x7010) else error(corrupt, "ARW2 lacks its tone curve")
+    if knots.count != 4:
+        error(corrupt, "ARW2 tone curve has the wrong size")
+    var points: usize[6] = [0, 0, 0, 0, 0, 4095]
+    for i: usize in 0..<4:
+        points[i + 1] = (usize)((try knots.uint(i) >> 2) & 0xfff)
+    meta.curve = try new u16[65536] in memory.heap
+    for i in 0..<meta.curve.length:
+        meta.curve[i] = (u16)i
+    for i: usize in 0..<5:
+        var j = points[i] + 1
+        while j <= points[i + 1]:
+            meta.curve[j] = meta.curve[j - 1] +% ((u16)1 << (u16)i)
+            j += 1
+
+## Sony's stream cipher over 32-bit big-endian words, dcraw's `sony_decrypt`.
+func sony_decrypt(data: u8[], key: u32):
+    var keys: u32[128]
+    var seed = key
+    for p: usize in 0..<4:
+        seed = seed *% 48828125 +% 1
+        keys[p] = seed
+    keys[3] = (keys[3] << 1) | ((keys[0] ^ keys[2]) >> 31)
+    for p: usize in 4..<127:
+        keys[p] = ((keys[p - 4] ^ keys[p - 2]) << 1) | ((keys[p - 3] ^ keys[p - 1]) >> 31)
+    var p: usize = 127
+    for word in 0..<data.length // 4:
+        p += 1
+        let value = keys[p & 127] ^ keys[(p + 64) & 127]
+        keys[(p - 1) & 127] = value
+        for b: usize in 0..<4:
+            data[word * 4 + b] ^= (u8)(value >> (24 - 8 * (u32)b))
+
+## The SR2Private directory at `offset`: decrypt its SR2 sub-IFD and read the
+## white balance and black levels from it.
+func sony_private(file: const u8[], meta: Meta*, main: const Directory*, offset: usize) -> !:
+    let private = try Directory.open(file, 0, offset, main.little)
+    let at = (usize)(try private.uint(0x7200))
+    let length = (usize)(try private.uint(0x7201))
+    let key = try private.find(0x7221) else return
+    if length < 16 or length > 1048576:
+        return
+    var key_reader = Reader(data = key.data, little = main.little)
+    let secret = (u32)(try key_reader.uint(4))
+    let copy = try alloc u8[length] in memory.heap
+    defer free(copy) in memory.heap
+    memory.copy(copy, try binary.slice(file, (u64)at, (u64)length), length)
+    sony_decrypt(copy, secret)
+    let sr2 = try Directory.open(copy, -(i64)at, 0, main.little)
+    if let levels = try sr2.find(0x7303):
+        if levels.count == 4:
+            try sony_balance(meta, try levels.real(1), (try levels.real(0) + try levels.real(3)) * 0.5, try levels.real(2))
+    if let levels = try sr2.find(0x7313):
+        if levels.count == 4:
+            try sony_balance(meta, try levels.real(0), (try levels.real(1) + try levels.real(2)) * 0.5, try levels.real(3))
+    if let black = try sr2.find(0x7310):
+        if black.count == 4:
+            try canonical_black(meta, &black)
+
+## An as-shot white balance from red, green and blue levels.
+func sony_balance(meta: Meta*, r: f64, g: f64, b: f64) -> !:
+    if r > 0.0 and g > 0.0 and b > 0.0:
+        meta.neutral = [g / r, 1.0, g / b]
+        meta.neutral_known = true
+
+## ARW2: rows of 16-byte blocks, each sixteen pixels of one color two apart.
+## Samples are stored as tone curve indexes; unpack applies the curve.
+func unpack_arw2(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
+    let data = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size)
+    let w = mosaic.width
+    var pixels: u16[16]
+    for y in 0..<mosaic.height:
+        let row = data[y * w..<(y + 1) * w]
+        var x: usize = 0
+        var at: usize = 0
+        while x + 30 < w and at + 16 <= row.length:
+            let block = row[at..<at + 16]
+            let head = (u32)block[0] | ((u32)block[1] << 8) | ((u32)block[2] << 16) | ((u32)block[3] << 24)
+            let high = head & 0x7ff
+            let low = (head >> 11) & 0x7ff
+            let high_at = (usize)((head >> 22) & 0x0f)
+            let low_at = (usize)((head >> 26) & 0x0f)
+            var shift: u32 = 0
+            while shift < 4 and ((i32)0x80 << (i32)shift) <= (i32)high - (i32)low:
+                shift += 1
+            var bit: usize = 30
+            for i: usize in 0..<16:
+                if i == high_at:
+                    pixels[i] = (u16)high
+                elif i == low_at:
+                    pixels[i] = (u16)low
+                else:
+                    let pair = (u32)block[bit >> 3] | ((u32)(block[(bit >> 3) + 1] if (bit >> 3) + 1 < 16 else 0) << 8)
+                    let value = (((pair >> (u32)(bit & 7)) & 0x7f) << shift) + low
+                    pixels[i] = (u16)(value if value < 0x7ff else 0x7ff)
+                    bit += 7
+            for i: usize in 0..<16:
+                mosaic.data[y * w + x] = pixels[i] << 1
+                x += 2
+            x -= 1 if (x & 1) == 1 else 31
+            at += 16
