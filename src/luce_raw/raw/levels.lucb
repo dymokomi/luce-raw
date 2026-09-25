@@ -60,6 +60,70 @@ struct Levels:
     var scales: f64[3]
     var ox: usize
     var oy: usize
+    var tables: LevelTables*?
+    var half: bool
+
+## Lookup tables for the usual mosaic: no DNG black deltas and a black pattern
+## that repeats within the filter's six. One table per distinct black level
+## and color maps every sample to its leveled value (as level_row computes
+## it) up to the first that clips; larger samples read that last entry. `of`
+## names the table of each position of the 6×6 period, from the active area's
+## corner.
+struct LevelTables:
+    var data: u16[]
+    var last: usize[12]
+    var blacks: f64[12]
+    var scales: f64[12]
+    var count: usize
+    var of: u8[36]
+
+    ## Tables for `job`, or none when the mosaic needs the general path.
+    static func plan(job: const Levels*) -> LevelTables?!:
+        let meta = job.meta
+        let rows = meta.black_rows
+        let columns = meta.black_columns
+        if meta.samples != 1 or job.horizontal.length > 0 or job.vertical.length > 0 or rows == 0 or columns == 0 or 6 % rows != 0 or 6 % columns != 0:
+            return none
+        var tables = LevelTables()
+        for i: usize in 0..<36:
+            let black = meta.black[((i // 6) % rows) * columns + (i % 6) % columns]
+            let color = (usize)meta.pattern[i]
+            let scale = job.scales[color if color < 3 else 1]
+            var id = tables.count
+            for k in 0..<tables.count:
+                if tables.blacks[k] == black and tables.scales[k] == scale:
+                    id = k
+            if id == tables.count:
+                if id == tables.last.length:
+                    return none
+                tables.blacks[id] = black
+                tables.scales[id] = scale
+                tables.count += 1
+            tables.of[i] = (u8)id
+        tables.data = try new u16[tables.count * 65536] in memory.heap
+        return tables
+
+    mutating func close():
+        if self.data.length > 0:
+            free(self.data) in memory.heap
+        self = LevelTables()
+
+## Fill table `index` of the Levels' tables; `parallel` calls it.
+func level_table(context: void*, index: usize, worker: usize) -> !:
+    let job = (Levels*)context
+    let tables = job.tables else return
+    let table = tables.data.data + index * 65536
+    let black = tables.blacks[index]
+    let scale = tables.scales[index]
+    var last: usize = 65535
+    for s: usize in 0..<65536:
+        let value = ((f64)s - black) * scale
+        if value >= 65535.0:
+            table[s] = 65535
+            last = s
+            break
+        table[s] = (u16)value if value > 0.0 else 0
+    tables.last[index] = last
 
 let band_rows: usize = 64
 
@@ -72,6 +136,17 @@ func level_row(job: const Levels*, y: usize, width: usize, out: noalias u16*):
     let columns = meta.black_columns
     let ay = job.oy + y
     let source = job.mosaic.data.data + ((meta.top + ay) * job.mosaic.width + meta.left + job.ox) * nc
+    if let tables = job.tables:
+        let ids = &tables.of[(ay % 6) * 6]
+        let data = tables.data.data
+        var phase = job.ox % 6
+        for x in 0..<width:
+            let id = (usize)ids[phase]
+            let value = (usize)source[x]
+            let last = tables.last[id]
+            out[x] = data[id * 65536 + (value if value < last else last)]
+            phase = 0 if phase == 5 else phase + 1
+        return
     let blacks = &meta.black[(ay % meta.black_rows) * columns * nc]
     let colors = &meta.pattern[(ay % 6) * 6]
     let row_delta = job.vertical[ay] if job.vertical.length > 0 else 0.0
@@ -160,48 +235,88 @@ func half_band(context: void*, index: usize, worker: usize) -> !:
                     row[x * 3] = (u16)(((u32)row[x * 3 - 3] + (u32)row[x * 3 + 3]) >> 1)
                     row[x * 3 + 2] = (u16)(((u32)row[x * 3 - 1] + (u32)row[x * 3 + 5]) >> 1)
 
-## The balanced Plane of `mosaic`'s active area, or of its default crop.
+## Level band `index` of a plane (full or half size); `parallel` calls it.
+func level_band(context: void*, index: usize, worker: usize) -> !:
+    let job = (Levels*)context
+    if job.half:
+        try half_band(context, index, worker)
+    else:
+        try normalize_band(context, index, worker)
+
+## How many mosaic rows level band `index` reads from the top.
+func level_rows(job: const Levels*, index: usize) -> usize:
+    let end = (usize)math.imin((i64)((index + 1) * band_rows), (i64)job.plane.height)
+    return job.meta.top + job.oy + end * (2 if job.half else 1)
+
+## What the level bands share besides the plane: DNG's black deltas and the
+## lookup tables.
+struct LevelStage:
+    var horizontal: f64[]
+    var vertical: f64[]
+    var tables: LevelTables
+    var bands: usize
+
+    ## Allocate `plane` for `mosaic`'s active area, or its default crop (see
+    ## normalize), and answer the Levels its bands run, which points into
+    ## this stage.
+    mutating func open(meta: const Meta*, mosaic: const Mosaic*, look: const Development*, crop: bool, half: bool, plane: Plane*, threads: usize) -> Levels!:
+        errdefer self.close()
+        let ox = meta.crop_x if crop else 0
+        let oy = meta.crop_y if crop else 0
+        let width = meta.crop_width if crop else meta.width
+        let height = meta.crop_height if crop else meta.height
+        let nc = meta.samples
+        let count = width *? height else error(limit, "raw image size overflows")
+        discard(count *? nc else error(limit, "raw image size overflows"))
+        *plane = Plane(width = width, height = height, channels = nc)
+        if half:
+            plane.width = width // 2
+            plane.height = height // 2
+            plane.channels = 3
+            if plane.width == 0 or plane.height == 0:
+                error(invalid, "raw image is too small for half size")
+        plane.data = try new u16[plane.width * plane.height * plane.channels] in memory.heap
+        plane.xtrans = meta.xtrans and not half
+        for i: usize in 0..<36:
+            plane.pattern[i] = (u8)meta.color(ox + i % 6, oy + i // 6)
+        for i: usize in 0..<4:
+            plane.cfa[i] = plane.pattern[(i // 2) * 6 + i % 2]
+        self.horizontal = try delta_values(&meta.black_h, meta.width)
+        self.vertical = try delta_values(&meta.black_v, meta.height)
+        # The scale of each color: multiplier × 65535 / (white − black); black
+        # varies per position, so the white's span is taken against the
+        # pattern's first entry.
+        var job = Levels(meta = meta, mosaic = mosaic, plane = plane, horizontal = self.horizontal, vertical = self.vertical, ox = ox, oy = oy, half = half)
+        for c: usize in 0..<3:
+            let white = meta.white[c if nc == 3 else 0]
+            let span = white - meta.black[c if nc == 3 else 0]
+            if span <= 0.0:
+                error(corrupt, "raw white level is not above the black level")
+            job.scales[c] = look.multipliers[c] * 65535.0 / span
+        if let planned = try LevelTables.plan(&job):
+            self.tables = planned
+            job.tables = &self.tables
+            try parallel(self.tables.count, threads, (void*)&job, level_table)
+        self.bands = (plane.height + band_rows - 1) // band_rows
+        return job
+
+    mutating func close():
+        release(self.horizontal)
+        release(self.vertical)
+        self.tables.close()
+        self = LevelStage()
+
+## The balanced Plane of `mosaic`'s active area, or of its default crop: each
+## sample less its black level, scaled so white after white balance is 65535.
 ## With `half`, each 2×2 cell of it becomes one RGB pixel instead, as LibRaw's
 ## half_size: red and blue as they are, the two greens of a Bayer cell averaged
 ## (the last green of an X-Trans cell), and X-Trans cells without red or blue
 ## given the mean of their left and right neighbours'.
 func normalize(meta: const Meta*, mosaic: const Mosaic*, look: const Development*, crop: bool, half: bool, threads: usize) -> Plane!:
-    let ox = meta.crop_x if crop else 0
-    let oy = meta.crop_y if crop else 0
-    let width = meta.crop_width if crop else meta.width
-    let height = meta.crop_height if crop else meta.height
-    let nc = meta.samples
-    let count = width *? height else error(limit, "raw image size overflows")
-    var plane = Plane(width = width, height = height, channels = nc)
-    if half:
-        plane.width = width // 2
-        plane.height = height // 2
-        plane.channels = 3
-        if plane.width == 0 or plane.height == 0:
-            error(invalid, "raw image is too small for half size")
-    plane.data = try new u16[plane.width * plane.height * plane.channels] in memory.heap
+    var plane = Plane()
     errdefer plane.close()
-    plane.xtrans = meta.xtrans
-    for i: usize in 0..<36:
-        plane.pattern[i] = (u8)meta.color(ox + i % 6, oy + i // 6)
-    for i: usize in 0..<4:
-        plane.cfa[i] = plane.pattern[(i // 2) * 6 + i % 2]
-    let horizontal = try delta_values(&meta.black_h, meta.width)
-    defer release(horizontal)
-    let vertical = try delta_values(&meta.black_v, meta.height)
-    defer release(vertical)
-    # The scale of each color: multiplier × 65535 / (white − black); black varies
-    # per position, so the white's span is taken against the pattern's first entry.
-    var job = Levels(meta = meta, mosaic = mosaic, plane = &plane, horizontal = horizontal, vertical = vertical, ox = ox, oy = oy)
-    for c: usize in 0..<3:
-        let white = meta.white[c if nc == 3 else 0]
-        let span = white - meta.black[c if nc == 3 else 0]
-        if span <= 0.0:
-            error(corrupt, "raw white level is not above the black level")
-        job.scales[c] = look.multipliers[c] * 65535.0 / span
-    if half:
-        try parallel((plane.height + band_rows - 1) // band_rows, threads, (void*)&job, half_band)
-        plane.xtrans = false
-    else:
-        try parallel((height + band_rows - 1) // band_rows, threads, (void*)&job, normalize_band)
+    var stage = LevelStage()
+    defer stage.close()
+    var job = try stage.open(meta, mosaic, look, crop, half, &plane, threads)
+    try parallel(stage.bands, threads, (void*)&job, level_band)
     return plane

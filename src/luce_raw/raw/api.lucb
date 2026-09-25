@@ -182,6 +182,9 @@ pub func develop(data: const u8[], options: Options, context: void*?, sink: func
         look.to_rgb = diagonal([1.0, 1.0, 1.0])
     let threads = options.threads if options.threads > 0 else (usize)os.cpus()
     let t1 = time.now()
+    if pipelines(&meta, threads):
+        try develop_pipelined(data, &meta, &look, options, threads, context, sink, t1 - t0)
+        return
     var mosaic = try unpack(data, &meta, threads)
     defer mosaic.close()
     meta.measure_black(&mosaic)

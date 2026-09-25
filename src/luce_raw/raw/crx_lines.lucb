@@ -49,12 +49,12 @@ inline func crx_set(p: CrxLine*, at: i64, value: i32):
     p.data[(usize)at] = value
 
 ## The next adaptive Golomb-Rice code.
-func crx_code(p: CrxLine*) -> u32!:
-    var code = (u32)(try fuji_zeros(&p.reader))
+func crx_code(p: CrxLine*) -> u32:
+    var code = (u32)(fuji_zeros(&p.reader))
     if code >= 41:
-        code = (u32)(try fuji_read(&p.reader, 21))
+        code = (u32)(fuji_read(&p.reader, 21))
     elif p.k > 0:
-        code = (u32)(try fuji_read(&p.reader, p.k)) | (code << (u32)p.k)
+        code = (u32)(fuji_read(&p.reader, p.k)) | (code << (u32)p.k)
     return code
 
 inline func crx_bit(value: bool) -> i64:
@@ -72,12 +72,12 @@ inline func crx_predict_k(previous: i32, code: u32, top: i32) -> i32:
 
 ## The length of a run of repeated values, at most `length`; LibRaw's run
 ## coding with its adaptive step `s`.
-func crx_run(p: CrxLine*, length: i32) -> i32!:
+func crx_run(p: CrxLine*, length: i32) -> i32:
     var count: i32 = 0
-    if try fuji_read(&p.reader, 1) == 0:
+    if fuji_read(&p.reader, 1) == 0:
         return 0
     count = 1
-    while try fuji_read(&p.reader, 1) != 0:
+    while fuji_read(&p.reader, 1) != 0:
         count += (i32)crx_run_steps[(usize)p.s]
         if count > length:
             count = length
@@ -88,15 +88,16 @@ func crx_run(p: CrxLine*, length: i32) -> i32!:
             break
     if count < length:
         if crx_run_bits[(usize)p.s] > 0:
-            count += try fuji_read(&p.reader, (i32)crx_run_bits[(usize)p.s])
+            count += fuji_read(&p.reader, (i32)crx_run_bits[(usize)p.s])
         if p.s > 0:
             p.s -= 1
         if count > length:
-            error(corrupt, "CR3 run length overruns its line")
+            p.reader.fault = true
+            count = length
     return count
 
 ## One symbol with (optionally) median prediction from the line above.
-func crx_symbol(p: CrxLine*, median: bool, not_end: bool) -> !:
+func crx_symbol(p: CrxLine*, median: bool, not_end: bool):
     let l0 = p.l0
     let l1 = p.l1
     if median:
@@ -107,7 +108,7 @@ func crx_symbol(p: CrxLine*, median: bool, not_end: bool) -> !:
         crx_set(p, l1 + 1, options[(usize)index])
     else:
         crx_set(p, l1 + 1, crx_get(p, l0 + 1))
-    var code = try crx_code(p)
+    var code = crx_code(p)
     crx_set(p, l1 + 1, crx_get(p, l1 + 1) +% crx_signed(code))
     if not_end:
         let next = (crx_get(p, l0 + 2) - crx_get(p, l0 + 1)) << 1
@@ -122,23 +123,23 @@ func crx_line(p: CrxLine*) -> !:
     crx_set(p, p.l1, crx_get(p, p.l0 + 1))
     while length > 1:
         if crx_get(p, p.l1) != crx_get(p, p.l0 + 1) or crx_get(p, p.l1) != crx_get(p, p.l0 + 2):
-            try crx_symbol(p, true, true)
+            crx_symbol(p, true, true)
         else:
-            let count = try crx_run(p, length)
+            let count = crx_run(p, length)
             length -= count
             p.l0 += (i64)count
             for _ in 0..<count:
                 crx_set(p, p.l1 + 1, crx_get(p, p.l1))
                 p.l1 += 1
             if length > 0:
-                try crx_symbol(p, false, length > 1)
+                crx_symbol(p, false, length > 1)
         length -= 1
     if length == 1:
-        try crx_symbol(p, true, false)
+        crx_symbol(p, true, false)
     crx_set(p, p.l1 + 1, crx_get(p, p.l1) +% 1)
 
 ## One symbol of a rounded (partially decodable) line.
-func crx_rounded_symbol(p: CrxLine*, predict: bool, update: bool) -> !:
+func crx_rounded_symbol(p: CrxLine*, predict: bool, update: bool):
     let l0 = p.l0
     let l1 = p.l1
     var predicted = crx_get(p, l0 + 1)
@@ -147,7 +148,7 @@ func crx_rounded_symbol(p: CrxLine*, predict: bool, update: bool) -> !:
         let left = crx_get(p, l1)
         let options: i32[4] = [delta + left, delta + left, left, crx_get(p, l0 + 1)]
         predicted = options[(usize)(crx_bit((crx_get(p, l0) < left) != (delta < 0)) * 2 + crx_bit((left < crx_get(p, l0 + 1)) != (delta < 0)))]
-    let code = try crx_code(p)
+    let code = crx_code(p)
     let value = crx_signed(code)
     crx_set(p, l1 + 1, p.rounded_mask *% 2 *% value +% (value >> 31) +% predicted)
     if update:
@@ -170,27 +171,27 @@ func crx_rounded_line(p: CrxLine*) -> !:
     var length = p.width
     while length > 1:
         if crx_abs(crx_get(p, p.l0 + 2) - crx_get(p, p.l0 + 1)) > p.rounded_mask:
-            try crx_rounded_symbol(p, true, true)
+            crx_rounded_symbol(p, true, true)
             p.l0 += 1
             reached = true
         elif reached or crx_abs(crx_get(p, p.l0) - crx_get(p, p.l1)) > p.rounded_mask:
-            try crx_rounded_symbol(p, true, true)
+            crx_rounded_symbol(p, true, true)
             p.l0 += 1
             reached = false
         else:
-            let count = try crx_run(p, length)
+            let count = crx_run(p, length)
             length -= count
             p.l0 += (i64)count
             for _ in 0..<count:
                 crx_set(p, p.l1 + 1, crx_get(p, p.l1))
                 p.l1 += 1
             if length > 1:
-                try crx_rounded_symbol(p, false, true)
+                crx_rounded_symbol(p, false, true)
                 p.l0 += 1
                 reached = crx_abs(crx_get(p, p.l0 + 1) - crx_get(p, p.l0)) > p.rounded_mask
             elif length == 1:
-                try crx_rounded_symbol(p, false, false)
+                crx_rounded_symbol(p, false, false)
         length -= 1
     if length == 1:
-        try crx_rounded_symbol(p, true, false)
+        crx_rounded_symbol(p, true, false)
     crx_set(p, p.l1 + 1, crx_get(p, p.l1) +% 1)

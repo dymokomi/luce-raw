@@ -25,12 +25,12 @@ inline func crx_prediction(left: i32, top: i32, delta_h: i32, delta_v: i32) -> i
     return options[(usize)(crx_bit((delta_v < 0) != (delta_h < 0)) * 2 + crx_bit((left < top) != (delta_h < 0)))]
 
 ## A quantization value of the table's Golomb code.
-func crx_qp(reader: Bits*, k: i32) -> u32!:
-    var qp = (u32)(try fuji_zeros(reader))
+func crx_qp(reader: Bits*, k: i32) -> u32:
+    var qp = (u32)(fuji_zeros(reader))
     if qp >= 23:
-        qp = (u32)(try fuji_read(reader, 8))
+        qp = (u32)(fuji_read(reader, 8))
     elif k > 0:
-        qp = (u32)(try fuji_read(reader, k)) | (qp << (u32)k)
+        qp = (u32)(fuji_read(reader, k)) | (qp << (u32)k)
     return qp
 
 ## Version 0x200's per-area quantization of one tile: decode the table, then
@@ -55,7 +55,7 @@ func crx_quantization(image: const CrxImage*, tile: CrxTile*) -> !:
             lines[b1] = 0
             for c in 0..<qw:
                 lines[b1 + c + 1] = lines[b1 + c]
-                let qp = try crx_qp(&reader, k)
+                let qp = crx_qp(&reader, k)
                 lines[b1 + c + 1] +%= crx_signed(qp)
                 k = crx_predict_k(k, qp, 7)
             lines[b1 + qw + 1] = lines[b1 + qw] + 1
@@ -64,7 +64,7 @@ func crx_quantization(image: const CrxImage*, tile: CrxTile*) -> !:
             var delta_h = lines[b0 + 1] - lines[b0]
             for c in 0..<qw:
                 lines[b1 + c + 1] = crx_prediction(lines[b1 + c], lines[b0 + c + 1], delta_h, lines[b0 + c] - lines[b1 + c])
-                let qp = try crx_qp(&reader, k)
+                let qp = crx_qp(&reader, k)
                 lines[b1 + c + 1] +%= crx_signed(qp)
                 if c + 1 < qw:
                     delta_h = lines[b0 + c + 2] - lines[b0 + c + 1]
@@ -72,6 +72,8 @@ func crx_quantization(image: const CrxImage*, tile: CrxTile*) -> !:
                 else:
                     k = crx_predict_k(k, qp, 7)
             lines[b1 + qw + 1] = lines[b1 + qw] + 1
+        if reader.fault:
+            error(corrupt, "CR3 quantization data is invalid or truncated")
         for c in 0..<qw:
             table[row * qw + c] = lines[b1 + c + 1] + 4
     var total = qh
@@ -120,11 +122,11 @@ func crx_band_line(image: const CrxImage*, tile: const CrxTile*, comp: CrxCompon
         return
     let table = tile.has_qp and image.header.version == 0x200
     if band.partial and not table:
-        var code = (u32)(try fuji_zeros(&band.coder.reader))
+        var code = (u32)(fuji_zeros(&band.coder.reader))
         if code >= 23:
-            code = (u32)(try fuji_read(&band.coder.reader, 8))
+            code = (u32)(fuji_read(&band.coder.reader, 8))
         elif band.k > 0:
-            code = (u32)(try fuji_read(&band.coder.reader, band.k)) | (code << (u32)band.k)
+            code = (u32)(fuji_read(&band.coder.reader, band.k)) | (code << (u32)band.k)
         band.q +%= crx_signed(code)
         band.k = crx_predict_k(band.k, code, 0)
         if band.k > 7:
@@ -233,6 +235,7 @@ func crx_initialize(image: const CrxImage*, tile: const CrxTile*, comp: CrxCompo
 struct CrxJob:
     var image: CrxImage*
     var mosaic: Mosaic*
+    var progress: Progress*?
 
 ## Write a decoded line of plane `plane` into the mosaic: crxConvertPlaneLine.
 func crx_convert(image: const CrxImage*, mosaic: Mosaic*, row: usize, column: usize, plane: usize, line: const i32[], count: usize):
@@ -273,6 +276,8 @@ func crx_plane(context: void*, plane: usize, worker: usize) -> !:
                     try crx_filter_transform(comp, image.levels - 1)
                     let line = crx_get_line(comp, image.levels - 1)
                     crx_convert(image, job.mosaic, row + i, column, plane, line, (usize)tile.width)
+                    if image.columns == 1 and (i & 15) == 15:
+                        crx_report(job, plane, row + i + 1)
             else:
                 # As LibRaw: an empty lossless plane leaves the rest of it undecoded.
                 if comp.bands[0].size == 0:
@@ -280,13 +285,24 @@ func crx_plane(context: void*, plane: usize, worker: usize) -> !:
                 for i in 0..<(usize)tile.height:
                     try crx_decode_line(&comp.bands[0].coder, comp.bands[0].buffer)
                     crx_convert(image, job.mosaic, row + i, column, plane, comp.bands[0].buffer, (usize)tile.width)
+                    if image.columns == 1 and (i & 15) == 15:
+                        crx_report(job, plane, row + i + 1)
             column += (usize)tile.width
         row += (usize)image.tiles[tile_row * image.columns].height
+        crx_report(job, plane, row)
+
+## Report plane `plane`'s first `rows` rows done: each plane row is two
+## sensor rows.
+func crx_report(job: const CrxJob*, plane: usize, rows: usize):
+    if let progress = job.progress:
+        progress.publish(plane, 2 * rows)
 
 ## Canon's CRX-coded CR3 sample: its picture header, then the four planes.
-func unpack_crx(file: const u8[], meta: const Meta*, mosaic: Mosaic*, threads: usize) -> !:
+func unpack_crx(file: const u8[], meta: const Meta*, mosaic: Mosaic*, threads: usize, progress: Progress*?) -> !:
     let sample = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size)
     var image = try crx_image(meta.crx, sample)
     defer image.close()
-    var job = CrxJob(image = &image, mosaic = mosaic)
+    var job = CrxJob(image = &image, mosaic = mosaic, progress = progress)
+    if let tracker = progress:
+        tracker.producers(4)
     try parallel(4, threads, (void*)&job, crx_plane)

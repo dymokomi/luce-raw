@@ -143,58 +143,57 @@ func fuji_params(data: const u8[]) -> FujiParams!:
             params.quant[k + 1] = quant
     return params
 
-## The largest number of zero bits a sample can start with.
+## The number of zero bits above the highest one bit of `value` (not zero),
+## from the exponent of its exact double: no branches.
 inline func leading32(value: u32) -> i32:
-    var n: i32 = 0
-    var x = value
-    if (x & 0xffff0000) == 0:
-        n += 16
-        x <<= 16
-    if (x & 0xff000000) == 0:
-        n += 8
-        x <<= 8
-    if (x & 0xf0000000) == 0:
-        n += 4
-        x <<= 4
-    if (x & 0xc0000000) == 0:
-        n += 2
-        x <<= 2
-    if (x & 0x80000000) == 0:
-        n += 1
-    return n
+    var real = (f64)value
+    let bits = *(const u64*)&real
+    return 1054 - (i32)(bits >> 52)
 
 ## Consume `n` bits; LibRaw tolerates reading one zero byte past the data.
-inline func fuji_consume(reader: Bits*, n: u32) -> !:
+## These helpers never fail: they set `reader.fault`, which their callers
+## check once per line, as returning errors per code would cost more than
+## the decoding.
+inline func fuji_consume(reader: Bits*, n: u32):
     reader.buffer = reader.buffer << n if n < 64 else 0
     reader.count -= n
     if reader.count + 8 < reader.padding:
-        error(corrupt, "Fujifilm compressed data is truncated")
+        reader.fault = true
 
 ## Count zero bits up to and including the next one bit.
-func fuji_zeros(reader: Bits*) -> i32!:
+func fuji_zeros(reader: Bits*) -> i32:
+    if reader.count < 33:
+        reader.fill()
+    let top = (u32)(reader.buffer >> 32)
+    if top != 0:
+        let n = leading32(top)
+        fuji_consume(reader, (u32)n + 1)
+        return n
     var zeros: i32 = 0
     while true:
         if reader.count < 33:
             reader.fill()
-        let top = (u32)(reader.buffer >> 32)
-        if top != 0:
-            let n = leading32(top)
-            try fuji_consume(reader, (u32)n + 1)
+        let upper = (u32)(reader.buffer >> 32)
+        if upper != 0:
+            let n = leading32(upper)
+            fuji_consume(reader, (u32)n + 1)
             return zeros + n
         zeros += 32
-        try fuji_consume(reader, 32)
-        if zeros > 1024:
-            error(corrupt, "Fujifilm compressed data is invalid")
+        fuji_consume(reader, 32)
+        if zeros > 1024 or reader.fault:
+            reader.fault = true
+            return 0
     return zeros
 
 ## The next `n` bits.
-func fuji_read(reader: Bits*, n: i32) -> i32!:
+func fuji_read(reader: Bits*, n: i32) -> i32:
     if n <= 0:
         return 0
     if n > 32:
-        error(corrupt, "Fujifilm compressed code is too long")
+        reader.fault = true
+        return 0
     if reader.count < (u32)n:
         reader.fill()
     let value = (i32)(u32)(reader.buffer >> (64 - (u32)n))
-    try fuji_consume(reader, (u32)n)
+    fuji_consume(reader, (u32)n)
     return value

@@ -204,6 +204,8 @@ func dng_levels(meta: Meta*, raw: const Directory*) -> !:
     if meta.black_rows == 0 or meta.black_columns == 0 or meta.black_rows * meta.black_columns * samples > meta.black.length:
         error(unsupported, "DNG black level pattern too large")
     if let black = try raw.find(50714):
+        if black.count == 0:
+            error(corrupt, "DNG black level has no values")
         let needed = meta.black_rows * meta.black_columns * samples
         for i in 0..<needed:
             meta.black[i] = try black.real(i if i < black.count else black.count - 1)
@@ -212,6 +214,8 @@ func dng_levels(meta: Meta*, raw: const Directory*) -> !:
     if let deltas = try raw.find(50716):
         meta.black_v = deltas
     if let white = try raw.find(50717):
+        if white.count == 0:
+            error(corrupt, "DNG white level has no values")
         for s in 0..<samples:
             meta.white[s] = try white.real(s if s < white.count else white.count - 1)
 

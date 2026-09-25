@@ -86,7 +86,10 @@ pub func main(arguments: str[]) -> i32!:
         if arguments.length > 6:
             options.exposure = arguments[6] == "1"
         if arguments.length > 7:
-            options.camera = arguments[7] == "camera"
+            if command == "develop":
+                options.camera = arguments[7] == "camera"
+            else:
+                options.threads = (usize)number(arguments[7])
         if arguments.length > 9:
             options.temperature = number(arguments[8])
             options.tint = number(arguments[9])

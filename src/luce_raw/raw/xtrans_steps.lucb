@@ -263,21 +263,45 @@ func xtrans_homogeneity(scratch: XtransScratch*, mr: i64, mc: i64, r0: i64, r1: 
                 let count = (u8)(*(up - 1) <= threshold) +% (u8)(*up <= threshold) +% (u8)(*(up + 1) <= threshold) +% (u8)(*(p - 1) <= threshold) +% (u8)(*p <= threshold) +% (u8)(*(p + 1) <= threshold) +% (u8)(*(down - 1) <= threshold) +% (u8)(*down <= threshold) +% (u8)(*(down + 1) <= threshold)
                 homo[base] = count
 
-## The mean of the most homogeneous directions over five-by-five windows.
+## The mean of the most homogeneous directions over five-by-five windows:
+## sliding five-wide sums of the homogeneity counts along the rows, sliding
+## five-tall sums of those down the columns (into the spent derivative
+## buffer), then per pixel the directions within an eighth of the best.
 func xtrans_average(scratch: XtransScratch*, t: i64, l: i64, r0: i64, r1: i64, c0: i64, c1: i64, x0: usize, y0: usize, x1: usize, y1: usize, out: u16[], stride: usize, ox: usize, oy: usize):
     let ts = xtrans_side
     let area = xtrans_side * xtrans_side
     let rgb = scratch.rgb.data
     let homo = scratch.homogeneity.data
-    # Five-wide horizontal sums, then five-tall sums of those per pixel.
     let sums = scratch.sums.data
+    let boxes = (u16*)scratch.derivative.data
+    let first = (usize)c0
+    let end = (usize)c1
     for d: usize in 0..<xtrans_directions:
+        let base = d * area
         for row in (usize)(r0 - 2)..<(usize)(r1 + 2):
-            for col in (usize)c0..<(usize)c1:
-                let at = d *% area +% row *% ts +% col
-                let h = homo + at
-                sums[at] = (u16)*(h - 2) +% (u16)*(h - 1) +% (u16)*h +% (u16)*(h + 1) +% (u16)*(h + 2)
-    let s2 = ts * 2
+            let h = homo + (base + row * ts)
+            let o = sums + (base + row * ts)
+            var across = (u32)h[first - 2] +% (u32)h[first - 1] +% (u32)h[first] +% (u32)h[first + 1] +% (u32)h[first + 2]
+            o[first] = (u16)across
+            for col in first + 1..<end:
+                across = across +% (u32)h[col + 2] -% (u32)h[col - 3]
+                o[col] = (u16)across
+        let top = (usize)r0
+        let box_top = boxes + (base + top * ts)
+        let s0 = sums + (base + (top - 2) * ts)
+        let s1 = s0 + ts
+        let s2 = s1 + ts
+        let s3 = s2 + ts
+        let s4 = s3 + ts
+        for col in first..<end:
+            box_top[col] = s0[col] +% s1[col] +% s2[col] +% s3[col] +% s4[col]
+        for row in top + 1..<(usize)r1:
+            let above = boxes + (base + (row - 1) * ts)
+            let here = boxes + (base + row * ts)
+            let entering = sums + (base + (row + 2) * ts)
+            let leaving = sums + (base + (row - 3) * ts)
+            for col in first..<end:
+                here[col] = above[col] +% entering[col] -% leaving[col]
     let target_base = out.data
     for y in y0..<y1:
         let row = (usize)((i64)y - t)
@@ -285,33 +309,79 @@ func xtrans_average(scratch: XtransScratch*, t: i64, l: i64, r0: i64, r1: i64, c
         for x in x0..<x1:
             let col = (usize)((i64)x - l)
             let at = row *% ts +% col
-            var hm: u32[8]
-            for d: usize in 0..<xtrans_directions:
-                let p = sums + (d *% area +% at)
-                hm[d] = (u32)*(p - s2) +% (u32)*(p - ts) +% (u32)*p +% (u32)*(p + ts) +% (u32)*(p + s2)
+            let q = boxes + at
+            let h0 = (u32)*q
+            let h1 = (u32)*(q + 1 * area)
+            let h2 = (u32)*(q + 2 * area)
+            let h3 = (u32)*(q + 3 * area)
+            let h4 = (u32)*(q + 4 * area)
+            let h5 = (u32)*(q + 5 * area)
+            let h6 = (u32)*(q + 6 * area)
+            let h7 = (u32)*(q + 7 * area)
             # Branch-free: of each opposite pair only the better survives
             # (both on a tie), then the best of all.
-            for d: usize in 0..<4:
-                let a = hm[d]
-                let b = hm[d + 4]
-                hm[d] = a *% (u32)(a >= b)
-                hm[d + 4] = b *% (u32)(b >= a)
-            var best = hm[0]
-            for d: usize in 1..<xtrans_directions:
-                best = (u32)max64((i64)best, (i64)hm[d])
+            let k0 = h0 *% (u32)(h0 >= h4)
+            let k4 = h4 *% (u32)(h4 >= h0)
+            let k1 = h1 *% (u32)(h1 >= h5)
+            let k5 = h5 *% (u32)(h5 >= h1)
+            let k2 = h2 *% (u32)(h2 >= h6)
+            let k6 = h6 *% (u32)(h6 >= h2)
+            let k3 = h3 *% (u32)(h3 >= h7)
+            let k7 = h7 *% (u32)(h7 >= h3)
+            var best = k0
+            best = best ^ ((best ^ k1) & -%(u32)(k1 > best))
+            best = best ^ ((best ^ k2) & -%(u32)(k2 > best))
+            best = best ^ ((best ^ k3) & -%(u32)(k3 > best))
+            best = best ^ ((best ^ k4) & -%(u32)(k4 > best))
+            best = best ^ ((best ^ k5) & -%(u32)(k5 > best))
+            best = best ^ ((best ^ k6) & -%(u32)(k6 > best))
+            best = best ^ ((best ^ k7) & -%(u32)(k7 > best))
             best -= best >> 3
             var red: u32 = 0
             var green: u32 = 0
             var blue: u32 = 0
             var count: u32 = 0
-            let o = at *% 3
-            for d: usize in 0..<xtrans_directions:
-                let take = (u32)(hm[d] >= best)
-                let p = rgb + (d *% area *% 3 +% o)
-                red +%= (u32)p[0] *% take
-                green +%= (u32)p[1] *% take
-                blue +%= (u32)p[2] *% take
-                count +%= take
+            let o = rgb + at *% 3
+            let take0 = (u32)(k0 >= best)
+            red +%= (u32)*o *% take0
+            green +%= (u32)*(o + 1) *% take0
+            blue +%= (u32)*(o + 2) *% take0
+            count +%= take0
+            let take1 = (u32)(k1 >= best)
+            red +%= (u32)*(o + 1 * area * 3) *% take1
+            green +%= (u32)*((o + 1 * area * 3) + 1) *% take1
+            blue +%= (u32)*((o + 1 * area * 3) + 2) *% take1
+            count +%= take1
+            let take2 = (u32)(k2 >= best)
+            red +%= (u32)*(o + 2 * area * 3) *% take2
+            green +%= (u32)*((o + 2 * area * 3) + 1) *% take2
+            blue +%= (u32)*((o + 2 * area * 3) + 2) *% take2
+            count +%= take2
+            let take3 = (u32)(k3 >= best)
+            red +%= (u32)*(o + 3 * area * 3) *% take3
+            green +%= (u32)*((o + 3 * area * 3) + 1) *% take3
+            blue +%= (u32)*((o + 3 * area * 3) + 2) *% take3
+            count +%= take3
+            let take4 = (u32)(k4 >= best)
+            red +%= (u32)*(o + 4 * area * 3) *% take4
+            green +%= (u32)*((o + 4 * area * 3) + 1) *% take4
+            blue +%= (u32)*((o + 4 * area * 3) + 2) *% take4
+            count +%= take4
+            let take5 = (u32)(k5 >= best)
+            red +%= (u32)*(o + 5 * area * 3) *% take5
+            green +%= (u32)*((o + 5 * area * 3) + 1) *% take5
+            blue +%= (u32)*((o + 5 * area * 3) + 2) *% take5
+            count +%= take5
+            let take6 = (u32)(k6 >= best)
+            red +%= (u32)*(o + 6 * area * 3) *% take6
+            green +%= (u32)*((o + 6 * area * 3) + 1) *% take6
+            blue +%= (u32)*((o + 6 * area * 3) + 2) *% take6
+            count +%= take6
+            let take7 = (u32)(k7 >= best)
+            red +%= (u32)*(o + 7 * area * 3) *% take7
+            green +%= (u32)*((o + 7 * area * 3) + 1) *% take7
+            blue +%= (u32)*((o + 7 * area * 3) + 2) *% take7
+            count +%= take7
             # Division by the count (1 to 8) as a multiply by ⌈2³² / count⌉,
             # exact for sums below 2²⁰.
             let reciprocal = reciprocals[(usize)count]

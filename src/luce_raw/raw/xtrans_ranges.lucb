@@ -1,0 +1,249 @@
+#==============================================================================================
+#
+#   raw/xtrans_ranges - Each X-Trans red and blue pixel's green range
+#
+#   DESCRIPTION:
+#       Markesteijn limits interpolated green at a red or blue pixel to the range
+#       of the greens in its hexagon. LibRaw fills those ranges in one sequential
+#       walk that zigzags between row pairs and lets a pixel reuse the range just
+#       computed for its neighbour. The walk's path depends only on the filter
+#       pattern and the plane's edges, never on the samples, so which pixel's
+#       hexagon sets each range is a pattern of period six away from the edges.
+#       walk_plan replays the path on a small plane with the same pattern and the
+#       same distances to each edge and records, per pixel, whose hexagon it
+#       uses; ranges_band then fills the real plane from that plan in parallel.
+#       One data dependence survives: a reused range whose maximum is zero is not
+#       reused, as LibRaw's `if (!max)` recomputes it; ranges_band follows that.
+#       Planes too small for the plan take the sequential walk (green_walk).
+#
+#==============================================================================================
+
+## Rows (and columns) at each edge the plan reproduces exactly; between them
+## one period of six stands for every interior row.
+let plan_edge: usize = 12
+
+## Where each pixel's range comes from, for a plane of `height` × `width`:
+## a small plane's offsets to the source pixel, `unvisited` where the walk
+## never sets a range.
+struct WalkPlan:
+    var dy: i8[]
+    var dx: i8[]
+    var height: usize
+    var width: usize
+    var real_height: usize
+    var real_width: usize
+
+    mutating func close():
+        if self.dy.length > 0:
+            free(self.dy) in memory.heap
+        if self.dx.length > 0:
+            free(self.dx) in memory.heap
+        self = WalkPlan()
+
+    ## The plan row standing for real row `row` (likewise for columns).
+    func small(row: usize, real: usize, size: usize) -> usize:
+        if row < plan_edge:
+            return row
+        if row >= real - plan_edge:
+            return size - (real - row)
+        return plan_edge + (row - plan_edge) % 6
+
+let unvisited: i8 = 127
+
+## The sizes a plan uses for a real extent: both edges and one period, with
+## the same remainder modulo six.
+func plan_extent(real: usize) -> usize:
+    let least = 2 * plan_edge + 6
+    return least + (real - least) % 6
+
+## Replay the walk's path on a small plane shaped like `plane`, recording the
+## source of each range; none when the plane is too small or a reuse would
+## chain (a reuse of a reuse), which the plan does not represent.
+func walk_plan(plane: const Plane*, rings: const Hexagons*) -> WalkPlan?!:
+    let least = 2 * plan_edge + 6
+    if plane.height < least + 6 or plane.width < least + 6:
+        return none
+    var plan = WalkPlan(height = plan_extent(plane.height), width = plan_extent(plane.width), real_height = plane.height, real_width = plane.width)
+    errdefer plan.close()
+    plan.dy = try new i8[plan.height * plan.width] in memory.heap
+    plan.dx = try new i8[plan.height * plan.width] in memory.heap
+    for i in 0..<plan.dy.length:
+        plan.dy[i] = unvisited
+    let w = (i64)plan.width
+    let h = (i64)plan.height
+    var row: i64 = 2
+    while row < h - 2:
+        var col: i64 = 2
+        var fresh = true
+        var reused = false
+        var source_row: i64 = 0
+        var source_col: i64 = 0
+        while col < w - 2:
+            if xcolor(plane, col, row) == 1:
+                fresh = true
+                col += 1
+                continue
+            if fresh:
+                source_row = row
+                source_col = col
+                reused = false
+            elif reused:
+                plan.close()
+                return none
+            else:
+                reused = true
+            fresh = false
+            let at = (usize)(row * w + col)
+            plan.dy[at] = (i8)(source_row - row)
+            plan.dx[at] = (i8)(source_col - col)
+            let phase = (row - (i64)rings.solitary_row) % 3
+            if phase == 1:
+                if row < h - 3:
+                    row += 1
+                    col -= 1
+            elif phase == 2:
+                fresh = true
+                col += 2
+                if col < w - 3 and row > 2:
+                    row -= 1
+            col += 1
+        row += 1
+    return plan
+
+## The least and greatest green of the hexagon around plane index `at`.
+inline func hexagon_range(plane: const Plane*, rings: const Hexagons*, at: usize, row: usize, col: usize) -> (u16, u16):
+    let base = ((row % 3) * 3 + col % 3) * 8
+    let p = plane.data.data + at
+    var low: u16 = 0xffff
+    var high: u16 = 0
+    for c: usize in 0..<6:
+        let value = *(p + (isize)rings.plane[base + c])
+        low = value if value < low else low
+        high = value if value > high else high
+    return (low, high)
+
+## What `ranges_band` reads and writes.
+struct RangeJob:
+    var plane: const Plane*
+    var rings: Hexagons*
+    var plan: const WalkPlan*
+
+## Rows [band_height × index, …) of the ranges, from the plan.
+func ranges_band(context: void*, index: usize, worker: usize) -> !:
+    let job = (RangeJob*)context
+    let plane = job.plane
+    let rings = job.rings
+    let plan = job.plan
+    let w = plane.width
+    let first = (usize)math.imax(2, (i64)(index * band_height))
+    let end = (usize)math.imin((i64)((index + 1) * band_height), (i64)plane.height - 2)
+    for row in first..<end:
+        let small_row = plan.small(row, plane.height, plan.height) * plan.width
+        for col in 2..<w - 2:
+            let entry = small_row + plan.small(col, w, plan.width)
+            let dy = plan.dy[entry]
+            if dy == unvisited:
+                continue
+            let at = row * w + col
+            let dx = plan.dx[entry]
+            let source_row = (usize)((i64)row + (i64)dy)
+            let source_col = (usize)((i64)col + (i64)dx)
+            var (low, high) = hexagon_range(plane, rings, source_row * w + source_col, source_row, source_col)
+            if high == 0 and (dy != 0 or dx != 0):
+                # LibRaw recomputes after a zero maximum, from a minimum
+                # already at zero.
+                let (own_low, own_high) = hexagon_range(plane, rings, at, row, col)
+                high = own_high
+            rings.low[at] = low
+            rings.high[at] = high
+
+## Fill `rings.low` and `rings.high` for every red and blue pixel as LibRaw's
+## walk does: from the plan on `threads`, or by the walk itself.
+func green_ranges(plane: const Plane*, rings: Hexagons*, threads: usize) -> !:
+    if let found = try walk_plan(plane, rings):
+        var plan = found
+        defer plan.close()
+        var job = RangeJob(plane = plane, rings = rings, plan = &plan)
+        try parallel((plane.height + band_height - 1) // band_height, threads, (void*)&job, ranges_band)
+    else:
+        try green_walk(plane, rings)
+
+## LibRaw's pass setting green1 and green3 to the minimum and maximum of each
+## non-green pixel's hexagon: a sequential walk that reuses a range for the
+## pixel below when the pattern lets it.
+func green_walk(plane: const Plane*, rings: Hexagons*) -> !:
+    let w = (i64)plane.width
+    let h = (i64)plane.height
+    let p = plane.data
+    var row: i64 = 2
+    var retries: i64 = 0
+    while row < h - 2:
+        var col: i64 = 2
+        var low: u16 = 0xffff
+        var high: u16 = 0
+        while col < w - 2:
+            if xcolor(plane, col, row) == 1:
+                low = 0xffff
+                high = 0
+                col += 1
+                continue
+            let at = row * w + col
+            if high == 0:
+                let base = (usize)((row % 3) * 3 + col % 3) * 8
+                for c: usize in 0..<6:
+                    let value = p[(usize)(at + rings.plane[base + c])]
+                    if low > value:
+                        low = value
+                    if high < value:
+                        high = value
+            rings.low[(usize)at] = low
+            rings.high[(usize)at] = high
+            let phase = (row - (i64)rings.solitary_row) % 3
+            if phase == 1:
+                if row < h - 3:
+                    row += 1
+                    col -= 1
+            elif phase == 2:
+                low = 0xffff
+                high = 0
+                col += 2
+                if col < w - 3 and row > 2:
+                    row -= 1
+                    retries += 1
+                    if retries > w * h:
+                        error(corrupt, "X-Trans pattern walk does not end")
+            col += 1
+        row += 1
+
+test "the planned green ranges equal LibRaw's walk on every pattern phase":
+    let sizes: usize[6] = [61, 47, 73, 66, 90, 43]
+    for shift: usize in 0..<6:
+        let h = sizes[shift]
+        let w = sizes[5 - shift]
+        let base_pattern: u8[36] = [1, 1, 0, 1, 1, 2, 1, 1, 2, 1, 1, 0, 2, 0, 1, 0, 2, 1, 1, 1, 2, 1, 1, 0, 1, 1, 0, 1, 1, 2, 0, 2, 1, 2, 0, 1]
+        var plane = Plane(width = w, height = h, channels = 1, xtrans = true)
+        for i: usize in 0..<36:
+            plane.pattern[i] = base_pattern[((i // 6 + shift) % 6) * 6 + (i % 6 + shift * 5) % 6]
+        plane.data = try new u16[w * h] in memory.heap
+        defer plane.close()
+        var seed: u32 = 12345 + (u32)shift
+        for i in 0..<plane.data.length:
+            seed = seed *% 1103515245 +% 12345
+            # Dark patches of zeros exercise LibRaw's recompute after a zero maximum.
+            plane.data[i] = 0 if (i // 97) % 5 == 0 else (u16)(seed >> 18)
+        var planned = try hexagons_of(&plane, 3)
+        defer planned.close()
+        var planned_ok = false
+        if let found = try walk_plan(&plane, &planned):
+            var plan = found
+            plan.close()
+            planned_ok = true
+        assert(planned_ok, "the plan was refused")
+        var walked = try hexagons_of(&plane, 3)
+        defer walked.close()
+        for i in 0..<walked.low.length:
+            walked.low[i] = 0
+            walked.high[i] = 0
+        try green_walk(&plane, &walked)
+        for i in 0..<plane.data.length:
+            assert(planned.low[i] == walked.low[i] and planned.high[i] == walked.high[i], "a planned range differs from the walk")

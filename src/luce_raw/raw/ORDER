@@ -36,9 +36,11 @@ levels.lucb
 bilinear.lucb
 ahd.lucb
 xtrans.lucb
+xtrans_ranges.lucb
 xtrans_tile.lucb
 xtrans_steps.lucb
 develop.lucb
+pipeline.lucb
 api.lucb
 recognize.lucb
 preview.lucb

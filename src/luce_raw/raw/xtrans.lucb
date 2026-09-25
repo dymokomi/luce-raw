@@ -49,8 +49,9 @@ inline func xcolor(plane: const Plane*, x: i64, y: i64) -> i64:
     return (i64)plane.pattern[(usize)((y + 6) % 6) * 6 + (usize)((x + 6) % 6)]
 
 ## Map the green hexagon around each non-green pixel and vice versa, and
-## limit each red and blue pixel's green to its hexagon's range.
-func hexagons_of(plane: const Plane*) -> Hexagons!:
+## (with `ranges`) limit each red and blue pixel's green to its hexagon's
+## range.
+func hexagons_of(plane: const Plane*, threads: usize, ranges: bool = true) -> Hexagons!:
     let orth: i64[12] = [1, 0, 0, 1, -1, 0, 0, -1, 1, 0, 0, 1]
     let patt: i64[32] = [0, 1, 0, -1, 2, 0, -1, 0, 1, 1, 1, -1, 0, 0, 0, 0, 0, 1, 0, -2, 1, 0, -2, 0, 1, 1, -2, -2, 1, -1, -1, 1]
     var rings = Hexagons()
@@ -87,52 +88,6 @@ func hexagons_of(plane: const Plane*) -> Hexagons!:
             error(unsupported, "this X-Trans filter pattern is not supported")
     rings.low = try new u16[plane.width * plane.height] in memory.heap
     rings.high = try new u16[plane.width * plane.height] in memory.heap
-    try green_ranges(plane, &rings)
+    if ranges:
+        try green_ranges(plane, &rings, threads)
     return rings
-
-## LibRaw's pass setting green1 and green3 to the minimum and maximum of each
-## non-green pixel's hexagon: a sequential walk that reuses a range for the
-## pixel below when the pattern lets it.
-func green_ranges(plane: const Plane*, rings: Hexagons*) -> !:
-    let w = (i64)plane.width
-    let h = (i64)plane.height
-    let p = plane.data
-    var row: i64 = 2
-    var retries: i64 = 0
-    while row < h - 2:
-        var col: i64 = 2
-        var low: u16 = 0xffff
-        var high: u16 = 0
-        while col < w - 2:
-            if xcolor(plane, col, row) == 1:
-                low = 0xffff
-                high = 0
-                col += 1
-                continue
-            let at = row * w + col
-            if high == 0:
-                let base = (usize)((row % 3) * 3 + col % 3) * 8
-                for c: usize in 0..<6:
-                    let value = p[(usize)(at + rings.plane[base + c])]
-                    if low > value:
-                        low = value
-                    if high < value:
-                        high = value
-            rings.low[(usize)at] = low
-            rings.high[(usize)at] = high
-            let phase = (row - (i64)rings.solitary_row) % 3
-            if phase == 1:
-                if row < h - 3:
-                    row += 1
-                    col -= 1
-            elif phase == 2:
-                low = 0xffff
-                high = 0
-                col += 2
-                if col < w - 3 and row > 2:
-                    row -= 1
-                    retries += 1
-                    if retries > w * h:
-                        error(corrupt, "X-Trans pattern walk does not end")
-            col += 1
-        row += 1

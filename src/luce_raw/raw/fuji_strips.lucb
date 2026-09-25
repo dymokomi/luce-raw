@@ -48,20 +48,21 @@ inline func remainder_bits(sum: i32, count: i32) -> i32:
 ## Decode one coded sample at `at` (index into the strip's lines) predicted as
 ## `prediction`, with the gradient `grad` of its neighbours; `even` samples
 ## scale their prediction down by four first. Returns the stored value.
-func fuji_code(strip: FujiStrip*, params: const FujiParams*, grads: FujiGrads*, quant_index: usize, grad: i32, prediction: i32) -> u16!:
-    let quant = strip.main if quant_index == 0 else params.quant[quant_index]
-    let gradient = (usize)absolute(grad)
-    let at = gradient * 2 if quant_index == 0 else ((quant_index - 1) * 5 + gradient) * 2
+func fuji_code(strip: FujiStrip*, params: const FujiParams*, grads: FujiGrads*, quant_index: usize, grad: i32, prediction: i32) -> u16:
+    let quant = (const FujiQuant*)&strip.main if quant_index == 0 else &params.quant[quant_index]
+    var gradient = (usize)absolute(grad)
     if (quant_index == 0 and gradient > 40) or (quant_index > 0 and gradient > 4):
-        error(corrupt, "Fujifilm compressed gradient out of range")
+        strip.reader.fault = true
+        gradient = 0
+    let at = gradient * 2 if quant_index == 0 else ((quant_index - 1) * 5 + gradient) * 2
     let sums: i32[] = grads.main[0..] if quant_index == 0 else grads.lossy[0..]
-    let zeros = try fuji_zeros(&strip.reader)
+    let zeros = fuji_zeros(&strip.reader)
     var code: i32 = 0
     if zeros < strip.max_bits - quant.raw_bits - 1:
         let bits = remainder_bits(sums[at], sums[at + 1])
-        code = try fuji_read(&strip.reader, bits) + (zeros << bits)
+        code = fuji_read(&strip.reader, bits) + (zeros << bits)
     else:
-        code = try fuji_read(&strip.reader, quant.raw_bits) + 1
+        code = fuji_read(&strip.reader, quant.raw_bits) + 1
     code = -1 - code // 2 if (code & 1) != 0 else code // 2
     sums[at] += absolute(code)
     if sums[at + 1] == params.min_value:
@@ -94,7 +95,7 @@ inline func fuji_grad(strip: const FujiStrip*, params: const FujiParams*, index:
     return quant * (i32)table[(usize)((i64)m + (i64)first)] + (i32)table[(usize)((i64)m + (i64)second)]
 
 ## An even position: coded, or when `interpolate`, predicted only.
-func fuji_even(strip: FujiStrip*, params: const FujiParams*, line: usize, pos: usize, grads: FujiGrads*, interpolate: bool) -> !:
+func fuji_even(strip: FujiStrip*, params: const FujiParams*, line: usize, pos: usize, grads: FujiGrads*, interpolate: bool):
     let w = params.line_width + 2
     let at = line * w + 1 + pos
     let l = strip.lines
@@ -111,10 +112,10 @@ func fuji_even(strip: FujiStrip*, params: const FujiParams*, line: usize, pos: u
         return
     let index = fuji_table(strip, params, fb + cb)
     let grad = fuji_grad(strip, params, index, rb - rf, rc - rb)
-    l[at] = try fuji_code(strip, params, grads, index, grad, sum >> 2)
+    l[at] = fuji_code(strip, params, grads, index, grad, sum >> 2)
 
 ## An odd position, predicted from its left and right neighbours.
-func fuji_odd(strip: FujiStrip*, params: const FujiParams*, line: usize, pos: usize, grads: FujiGrads*) -> !:
+func fuji_odd(strip: FujiStrip*, params: const FujiParams*, line: usize, pos: usize, grads: FujiGrads*):
     let w = params.line_width + 2
     let at = line * w + 1 + pos
     let l = strip.lines
@@ -126,7 +127,7 @@ func fuji_odd(strip: FujiStrip*, params: const FujiParams*, line: usize, pos: us
     let index = fuji_table(strip, params, absolute(rb - rc) + absolute(rc - ra))
     let grad = fuji_grad(strip, params, index, rb - rc, rc - ra)
     let prediction = (rg + ra + 2 * rb) >> 2 if (rb > rc and rb > rd) or (rb < rc and rb < rd) else (ra + rg) >> 1
-    l[at] = try fuji_code(strip, params, grads, index, grad, prediction)
+    l[at] = fuji_code(strip, params, grads, index, grad, prediction)
 
 ## Copy each line's edge from the line before, for lines `first` to `last`.
 func fuji_extend(strip: FujiStrip*, width: usize, first: usize, last: usize):
@@ -145,7 +146,7 @@ func fuji_extend_group(strip: FujiStrip*, width: usize, line: usize):
         fuji_extend(strip, width, 15, 17)
 
 ## One step of six rows: the six passes.
-func fuji_block(strip: FujiStrip*, params: const FujiParams*) -> !:
+func fuji_block(strip: FujiStrip*, params: const FujiParams*):
     let lw = params.line_width
     for pass in (xtrans_passes if params.xtrans else bayer_passes):
         let set = (usize)pass.set
@@ -157,26 +158,36 @@ func fuji_block(strip: FujiStrip*, params: const FujiParams*) -> !:
                     let line = (usize)(pass.a if side == 0 else pass.b)
                     let rule = pass.a_rule if side == 0 else pass.b_rule
                     let interpolate = rule == 1 or (rule == 2 and (even & 3) == 0) or (rule == 3 and (even & 3) == 2)
-                    try fuji_even(strip, params, line, even, &strip.even[set], interpolate)
+                    fuji_even(strip, params, line, even, &strip.even[set], interpolate)
                 even += 2
             if even > 8:
-                try fuji_odd(strip, params, (usize)pass.a, odd, &strip.odd[set])
-                try fuji_odd(strip, params, (usize)pass.b, odd, &strip.odd[set])
+                fuji_odd(strip, params, (usize)pass.a, odd, &strip.odd[set])
+                fuji_odd(strip, params, (usize)pass.b, odd, &strip.odd[set])
                 odd += 2
         fuji_extend_group(strip, lw, (usize)pass.a)
         fuji_extend_group(strip, lw, (usize)pass.b)
 
-## Lay the six decoded rows of step `line` of strip `block` into the mosaic.
-func fuji_copy(strip: const FujiStrip*, params: const FujiParams*, meta: const Meta*, mosaic: Mosaic*, line: usize, block: usize, width: usize):
+## Where each of the six rows of a step finds its samples in the line
+## buffers, for every column of strip `block` (`width` columns): the filter
+## color picks the buffer, X-Trans packs two of every three columns.
+func fuji_layout(params: const FujiParams*, meta: const Meta*, block: usize, width: usize, layout: u32[]):
     let w = params.line_width + 2
     for row: usize in 0..<6:
-        let y = line * 6 + row
-        let target = y * mosaic.width + block * params.block_width
         for p in 0..<width:
-            let color = meta.color(block * params.block_width + p, y)
+            let color = meta.color(block * params.block_width + p, row)
             let buffer = fuji_r2 + (row >> 1) if color == 0 else fuji_b2 + (row >> 1) if color == 2 else fuji_g2 + row
             let index = ((((p * 2 // 3) & ~(usize)1) | ((p % 3) & 1)) + ((p % 3) >> 1)) if params.xtrans else p >> 1
-            mosaic.data[target + p] = strip.lines[buffer * w + 1 + index]
+            layout[row * width + p] = (u32)(buffer * w + 1 + index)
+
+## Lay the six decoded rows of step `line` of strip `block` into the mosaic.
+func fuji_copy(strip: const FujiStrip*, params: const FujiParams*, mosaic: Mosaic*, line: usize, block: usize, width: usize, layout: const u32[]):
+    let lines = strip.lines.data
+    for row: usize in 0..<6:
+        let y = line * 6 + row
+        let target = mosaic.data.data + (y * mosaic.width + block * params.block_width)
+        let map = layout.data + row * width
+        for p in 0..<width:
+            target[p] = lines[map[p]]
 
 ## What `fuji_strip` reads: the strips' data and where to write.
 struct FujiJob:
@@ -186,6 +197,7 @@ struct FujiJob:
     var strips: const u8[]
     var offsets: usize[17]
     var q_bases: const u8[]
+    var progress: Progress*?
 
 ## Decode strip `block`; strips write disjoint columns, so `parallel` may run them at once.
 func fuji_strip(context: void*, block: usize, worker: usize) -> !:
@@ -212,6 +224,10 @@ func fuji_strip(context: void*, block: usize, worker: usize) -> !:
     if params.lossless:
         fuji_main_grads(&strip)
     let width = params.block_width if block + 1 < params.blocks else job.mosaic.width - params.block_width * block
+    # The filter repeats every six rows, as a step does.
+    let layout = try new u32[6 * width] in memory.heap
+    defer free(layout) in memory.heap
+    fuji_layout(params, job.meta, block, width, layout)
     let step = (params.lines + 15) & ~(usize)15
     # Lines 0 and 1 of each color take lines 3 and 4 (or 6 and 7) after each step.
     let keep: usize[12] = [0, 3, 1, 4, 5, 11, 6, 12, 13, 16, 14, 17]
@@ -221,10 +237,14 @@ func fuji_strip(context: void*, block: usize, worker: usize) -> !:
             if line == 0 or base != strip.main.base:
                 strip.max_bits = fuji_main_table(&strip.main, params.max_value, base)
                 fuji_main_grads(&strip)
-        try fuji_block(&strip, params)
+        fuji_block(&strip, params)
+        if strip.reader.fault:
+            error(corrupt, "Fujifilm compressed data is invalid or truncated")
         for k: usize in 0..<6:
             memory.copy(strip.lines[keep[k * 2] * w..], strip.lines[keep[k * 2 + 1] * w..], w)
-        fuji_copy(&strip, params, job.meta, job.mosaic, line, block, width)
+        fuji_copy(&strip, params, job.mosaic, line, block, width, layout)
+        if let progress = job.progress:
+            progress.publish(block, (line + 1) * 6)
         for group: usize in 0..<3:
             let first = fuji_r2 if group == 0 else fuji_g2 if group == 1 else fuji_b2
             let count: usize = 6 if group == 1 else 3
@@ -244,14 +264,16 @@ func fuji_main_grads(strip: FujiStrip*):
             strip.odd[set].main[i * 2 + 1] = 1
 
 ## Fujifilm's compressed RAF: header, strip sizes, lossy bases, then strips.
-func unpack_fuji(file: const u8[], meta: const Meta*, mosaic: Mosaic*, threads: usize) -> !:
+func unpack_fuji(file: const u8[], meta: const Meta*, mosaic: Mosaic*, threads: usize, progress: Progress*?) -> !:
     let data = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size)
     var params = try fuji_params(data)
     defer params.close()
     if params.lines * 6 != mosaic.height or mosaic.width > params.blocks * params.block_width:
         error(corrupt, "Fujifilm compressed header disagrees with the raw size")
     var sizes = Reader(data = data, position = 16, little = false)
-    var job = FujiJob(params = &params, meta = meta, mosaic = mosaic)
+    var job = FujiJob(params = &params, meta = meta, mosaic = mosaic, progress = progress)
+    if let tracker = progress:
+        tracker.producers(params.blocks)
     var total: usize = 0
     var lengths: usize[17]
     for b in 0..<params.blocks:

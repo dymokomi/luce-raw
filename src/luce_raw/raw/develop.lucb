@@ -74,7 +74,29 @@ struct Extent:
 func mirrored(range: Extent, length: usize, flip: bool) -> Extent:
     return Extent(start = length - range.end, end = length - range.start) if flip else range
 
-## Develop output tile `index` on `worker`; `parallel` calls it.
+## The output tile of item `index`: items run down the plane's rows whatever
+## the orientation, so a pipeline (pipeline.lucb) can follow the sensor data
+## as it arrives.
+func tile_of(job: const Job*, index: usize) -> usize:
+    let o = job.orientation
+    let down = (job.height + job.tile - 1) // job.tile
+    if o < 5:
+        let row = index // job.across
+        let ty = down - 1 - row if o == 3 or o == 4 else row
+        return ty * job.across + index % job.across
+    let column = index // down
+    let tx = job.across - 1 - column if o == 6 or o == 7 else column
+    return (index % down) * job.across + tx
+
+## The plane's rows behind item `index`: [start, end).
+func source_rows(job: const Job*, index: usize) -> Extent:
+    let tile = tile_of(job, index)
+    let o = job.orientation
+    let across = Extent(start = tile % job.across * job.tile, end = (usize)math.imin((i64)(tile % job.across * job.tile + job.tile), (i64)job.width))
+    let down = Extent(start = tile // job.across * job.tile, end = (usize)math.imin((i64)(tile // job.across * job.tile + job.tile), (i64)job.height))
+    return mirrored(down, job.plane.height, o == 3 or o == 4) if o < 5 else mirrored(across, job.plane.height, o == 6 or o == 7)
+
+## Develop output tile of item `index` on `worker`; `parallel` calls it.
 func develop_item(context: void*, index: usize, worker: usize) -> !:
     let job = (Job*)context
     let space = job.spaces + worker
@@ -82,8 +104,9 @@ func develop_item(context: void*, index: usize, worker: usize) -> !:
         try space.prepare(job)
     let plane = job.plane
     let o = job.orientation
-    let ox0 = index % job.across * job.tile
-    let oy0 = index // job.across * job.tile
+    let number = tile_of(job, index)
+    let ox0 = number % job.across * job.tile
+    let oy0 = number // job.across * job.tile
     let across = Extent(start = ox0, end = (usize)math.imin((i64)(ox0 + job.tile), (i64)job.width))
     let down = Extent(start = oy0, end = (usize)math.imin((i64)(oy0 + job.tile), (i64)job.height))
     let ow = across.end - across.start
@@ -224,33 +247,52 @@ func release_spaces(spaces: Workspace[]):
         spaces[i].close()
     free(spaces) in memory.heap
 
+## Everything the tiles of one develop share, built before the first tile:
+## the Lab table, the X-Trans hexagons and the workers' buffers.
+struct DevelopStage:
+    var table: LabTable
+    var hexagons: Hexagons
+    var spaces: Workspace[]
+    var count: usize
+
+    ## Prepare to develop `plane` (see develop_plane) and answer the Job the
+    ## tiles run, which points into this stage. With `ranges` false the
+    ## X-Trans green ranges are left for the caller to fill.
+    mutating func open(plane: const Plane*, look: const Development*, quality: Quality, gain: f64, orientation: u64, tile: usize, alpha: bool, threads: usize, context: void*?, sink: func(void*?, const Tile*) -> unit!, ranges: bool) -> Job!:
+        errdefer self.close()
+        if tile == 0 or tile > 16384:
+            error(invalid, "raw tile size must be 1 to 16384")
+        if quality == .best and plane.channels == 1:
+            self.table = try LabTable.create(look.to_xyz)
+        let o = orientation if orientation >= 1 and orientation <= 8 else 1
+        let width = plane.height if o >= 5 else plane.width
+        let height = plane.width if o >= 5 else plane.height
+        let across = (width + tile - 1) // tile
+        self.count = across * ((height + tile - 1) // tile)
+        self.spaces = try new Workspace[workers(self.count, threads)] in memory.heap
+        var job = Job(plane = plane, table = &self.table, quality = quality, orientation = o, width = width, height = height, tile = tile, across = across, channels = 4 if alpha else 3, context = context, sink = sink, spaces = self.spaces.data)
+        let k = gain / 65535.0
+        for i: usize in 0..<9:
+            job.matrix[i] = (f32)(look.to_rgb[i] * k)
+        # X-Trans at best quality: Markesteijn, on planes big enough for its tiles.
+        if plane.xtrans and plane.channels == 1 and quality == .best and plane.width >= 32 and plane.height >= 32:
+            self.hexagons = try hexagons_of(plane, threads, ranges)
+            job.hexagons = &self.hexagons
+        return job
+
+    mutating func close():
+        self.table.close()
+        self.hexagons.close()
+        if self.spaces.length > 0:
+            release_spaces(self.spaces)
+        self = DevelopStage()
+
 ## Develop `plane` with `look`'s matrix and `gain` into tiles of the oriented
 ## image, handing each to `sink(context, tile)` from the worker threads, on
 ## `threads`; answers the demosaic and output time summed over the threads.
 func develop_plane(plane: const Plane*, look: const Development*, quality: Quality, gain: f64, orientation: u64, tile: usize, alpha: bool, threads: usize, context: void*?, sink: func(void*?, const Tile*) -> unit!) -> (u64, u64)!:
-    if tile == 0 or tile > 16384:
-        error(invalid, "raw tile size must be 1 to 16384")
-    var table = LabTable()
-    defer table.close()
-    if quality == .best and plane.channels == 1:
-        table = try LabTable.create(look.to_xyz)
-    let o = orientation if orientation >= 1 and orientation <= 8 else 1
-    let width = plane.height if o >= 5 else plane.width
-    let height = plane.width if o >= 5 else plane.height
-    let across = (width + tile - 1) // tile
-    let down = (height + tile - 1) // tile
-    var hexagons = Hexagons()
-    defer hexagons.close()
-    let count = workers(across * down, threads)
-    let spaces = try new Workspace[count] in memory.heap
-    defer release_spaces(spaces)
-    var job = Job(plane = plane, table = &table, quality = quality, orientation = o, width = width, height = height, tile = tile, across = across, channels = 4 if alpha else 3, context = context, sink = sink, spaces = spaces.data)
-    let k = gain / 65535.0
-    for i: usize in 0..<9:
-        job.matrix[i] = (f32)(look.to_rgb[i] * k)
-    # X-Trans at best quality: Markesteijn, on planes big enough for its tiles.
-    if plane.xtrans and plane.channels == 1 and quality == .best and plane.width >= 32 and plane.height >= 32:
-        hexagons = try hexagons_of(plane)
-        job.hexagons = &hexagons
-    try parallel(across * down, count, (void*)&job, develop_item)
+    var stage = DevelopStage()
+    defer stage.close()
+    var job = try stage.open(plane, look, quality, gain, orientation, tile, alpha, threads, context, sink, true)
+    try parallel(stage.count, stage.spaces.length, (void*)&job, develop_item)
     return (job.demosaic_ns.load(), job.output_ns.load())

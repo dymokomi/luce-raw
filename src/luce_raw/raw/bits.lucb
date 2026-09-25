@@ -21,6 +21,9 @@ struct Bits:
     var padding: u32
     var stuffed: bool
     var marker: bool
+    # Set by decoders that report a corrupt stream once per line rather than
+    # per code (fuji_compressed.lucb); they check it and fail.
+    var fault: bool
 
     ## Top the buffer up to at least 57 bits, with zero padding past the data or
     ## at a JPEG marker: eight bytes at once where no 0xFF hides among them,

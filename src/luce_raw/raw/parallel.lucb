@@ -5,9 +5,10 @@
 #   DESCRIPTION:
 #       parallel runs `work(context, index, worker)` for every index below `count`,
 #       workers taking the next index from a shared counter; `worker` numbers the
-#       thread (below the thread count) so items can reuse per-worker scratch. Items must write disjoint
-#       memory. The first failure stops further items and is returned once every
-#       worker has finished, so a corrupt tile reports its own error.
+#       thread (below the thread count) so items can reuse per-worker scratch.
+#       Items must write disjoint memory. The first failure stops further items
+#       and is returned once every worker has finished, so a corrupt tile
+#       reports its own error.
 #
 #==============================================================================================
 

@@ -34,9 +34,10 @@
 #       levels.lucb    black and white levels, white balance and clipping to [0, 1]
 #       bilinear.lucb  the fast demosaic
 #       ahd.lucb       adaptive homogeneity-directed demosaic
-#       xtrans.lucb, xtrans_tile.lucb, xtrans_steps.lucb
+#       xtrans.lucb, xtrans_ranges.lucb, xtrans_tile.lucb, xtrans_steps.lucb
 #                      Markesteijn's X-Trans demosaic
 #       develop.lucb   tiles through demosaic, matrix and orientation into the Raster
+#       pipeline.lucb  developing while Fujifilm and CRX data still decode
 #       api.lucb       detect, probe, decode, info, white balance and sensor
 #       recognize.lucb which files are camera raws at all
 #       preview.lucb   the largest embedded JPEG

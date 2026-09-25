@@ -20,16 +20,16 @@ func crx_no_reference_line(p: CrxLine*) -> !:
     while i < w - 1:
         let at = (i64)i
         if (crx_get(p, l0 + at + 2) | crx_get(p, l0 + at + 1) | crx_get(p, l1 + at)) != 0:
-            let code = try crx_code(p)
+            let code = crx_code(p)
             crx_set(p, l1 + at + 1, crx_signed(code))
             p.k = crx_predict_k(p.k, code, 0)
-            try crx_progress_k(p, at + 1)
+            crx_progress_k(p, at + 1)
         else:
             var count: i32 = 0
-            if try fuji_read(&p.reader, 1) != 0:
+            if fuji_read(&p.reader, 1) != 0:
                 count = 1
                 if i != w - 1:
-                    while try fuji_read(&p.reader, 1) != 0:
+                    while fuji_read(&p.reader, 1) != 0:
                         count += (i32)crx_run_steps[(usize)p.s]
                         if i + count > w:
                             count = w - i
@@ -40,11 +40,12 @@ func crx_no_reference_line(p: CrxLine*) -> !:
                             break
                     if i + count < w:
                         if crx_run_bits[(usize)p.s] > 0:
-                            count += try fuji_read(&p.reader, (i32)crx_run_bits[(usize)p.s])
+                            count += fuji_read(&p.reader, (i32)crx_run_bits[(usize)p.s])
                         if p.s > 0:
                             p.s -= 1
                     if i + count > w:
-                        error(corrupt, "CR3 run length overruns its line")
+                        p.reader.fault = true
+                        count = w - i
             if count > 0:
                 for j in 0..<(i64)count:
                     crx_set(p, l1 + at + 1 + j, 0)
@@ -53,27 +54,27 @@ func crx_no_reference_line(p: CrxLine*) -> !:
             let next = (i64)i
             if i >= w - 1:
                 if i == w - 1:
-                    let code = try crx_code(p)
+                    let code = crx_code(p)
                     crx_set(p, l1 + next + 1, crx_signed(code + 1))
                     p.k = crx_predict_k(p.k, code, 15)
                     p.progress[(usize)(p.l2 + next)] = p.k
                 # C's `continue` still steps the loop counter.
                 i += 1
                 continue
-            let code = try crx_code(p)
+            let code = crx_code(p)
             crx_set(p, l1 + next + 1, crx_signed(code + 1))
             p.k = crx_predict_k(p.k, code, 0)
-            try crx_progress_k(p, next + 1)
+            crx_progress_k(p, next + 1)
         p.progress[(usize)(p.l2 + (i64)i)] = p.k
         i += 1
     if i == w - 1:
-        let code = try crx_code(p)
+        let code = crx_code(p)
         crx_set(p, l1 + (i64)i + 1, crx_signed(code))
         p.k = crx_predict_k(p.k, code, 15)
         p.progress[(usize)(p.l2 + (i64)i)] = p.k
 
 ## The adjustment of `k` towards the previous line's at column `at`.
-inline func crx_progress_k(p: CrxLine*, at: i64) -> !:
+inline func crx_progress_k(p: CrxLine*, at: i64):
     if p.progress[(usize)(p.l2 + at)] - p.k <= 1:
         if p.k >= 15:
             p.k = 15
@@ -88,7 +89,7 @@ func crx_top_line(p: CrxLine*) -> !:
         if crx_get(p, p.l1) != 0:
             crx_set(p, p.l1 + 1, crx_get(p, p.l1))
         else:
-            let count = try crx_run(p, length)
+            let count = crx_run(p, length)
             length -= count
             for _ in 0..<count:
                 crx_set(p, p.l1 + 1, crx_get(p, p.l1))
@@ -96,14 +97,14 @@ func crx_top_line(p: CrxLine*) -> !:
             if count > 0 and length <= 0:
                 break
             crx_set(p, p.l1 + 1, 0)
-        let code = try crx_code(p)
+        let code = crx_code(p)
         crx_set(p, p.l1 + 1, crx_get(p, p.l1 + 1) +% crx_signed(code))
         p.k = crx_predict_k(p.k, code, 15)
         p.l1 += 1
         length -= 1
     if length == 1:
         crx_set(p, p.l1 + 1, crx_get(p, p.l1))
-        let code = try crx_code(p)
+        let code = crx_code(p)
         crx_set(p, p.l1 + 1, crx_get(p, p.l1 + 1) +% crx_signed(code))
         p.k = crx_predict_k(p.k, code, 15)
         p.l1 += 1
@@ -117,7 +118,7 @@ func crx_rounded_top_line(p: CrxLine*) -> !:
         if crx_abs(crx_get(p, p.l1)) > p.rounded_mask:
             crx_set(p, p.l1 + 1, crx_get(p, p.l1))
         else:
-            let count = try crx_run(p, length)
+            let count = crx_run(p, length)
             length -= count
             for _ in 0..<count:
                 crx_set(p, p.l1 + 1, crx_get(p, p.l1))
@@ -125,14 +126,14 @@ func crx_rounded_top_line(p: CrxLine*) -> !:
             if length <= 0:
                 break
             crx_set(p, p.l1 + 1, 0)
-        let code = try crx_code(p)
+        let code = crx_code(p)
         let value = crx_signed(code)
         crx_set(p, p.l1 + 1, crx_get(p, p.l1 + 1) +% p.rounded_mask *% 2 *% value +% (value >> 31))
         p.k = crx_predict_k(p.k, code, 15)
         p.l1 += 1
         length -= 1
     if length == 1:
-        let code = try crx_code(p)
+        let code = crx_code(p)
         let value = crx_signed(code)
         crx_set(p, p.l1 + 1, crx_get(p, p.l1 + 1) +% p.rounded_mask *% 2 *% value +% (value >> 31))
         p.k = crx_predict_k(p.k, code, 15)
@@ -147,11 +148,11 @@ func crx_no_reference_top_line(p: CrxLine*) -> !:
     var length = p.width
     while length > 1:
         if crx_get(p, p.l1) != 0:
-            let code = try crx_code(p)
+            let code = crx_code(p)
             crx_set(p, p.l1 + 1, crx_signed(code))
             p.k = crx_predict_k(p.k, code, 15)
         else:
-            let count = try crx_run(p, length)
+            let count = crx_run(p, length)
             length -= count
             for _ in 0..<count:
                 p.progress[(usize)p.l2] = 0
@@ -160,7 +161,7 @@ func crx_no_reference_top_line(p: CrxLine*) -> !:
                 p.l2 += 1
             if length <= 0:
                 break
-            let code = try crx_code(p)
+            let code = crx_code(p)
             crx_set(p, p.l1 + 1, crx_signed(code + 1))
             p.k = crx_predict_k(p.k, code, 15)
         p.progress[(usize)p.l2] = p.k
@@ -168,7 +169,7 @@ func crx_no_reference_top_line(p: CrxLine*) -> !:
         p.l1 += 1
         length -= 1
     if length == 1:
-        let code = try crx_code(p)
+        let code = crx_code(p)
         crx_set(p, p.l1 + 1, crx_signed(code))
         p.k = crx_predict_k(p.k, code, 15)
         p.progress[(usize)p.l2] = p.k
@@ -208,5 +209,7 @@ func crx_decode_line(p: CrxLine*, out: i32[]) -> !:
         try crx_line(p)
     else:
         try crx_rounded_line(p)
+    if p.reader.fault:
+        error(corrupt, "CR3 data is invalid or truncated")
     memory.copy(out, p.data[start..], (usize)p.width)
     p.line += 1

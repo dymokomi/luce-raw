@@ -1,0 +1,247 @@
+#==============================================================================================
+#
+#   raw/pipeline - Developing while the sensor data is still being decoded
+#
+#   DESCRIPTION:
+#       Fujifilm's compressed strips and Canon's CRX planes decode on a handful
+#       of threads, top to bottom. Rather than wait for the whole sensor, the
+#       pipeline hands the other workers the later stages as soon as the rows
+#       they read exist: one `parallel` run whose first item is the unpack
+#       (which starts its own strip or plane threads) and whose other items, the
+#       level bands, the X-Trans green-range bands and the output tiles, are
+#       scheduled by the level band they need last, so work follows the rows
+#       down the sensor. An item waits only on earlier items, which are already
+#       running, so the run cannot stall. Rows arrive through a Progress (the slowest
+#       producer's row count); bands report through done flags. A failing
+#       item aborts the run: waiters wake and return quietly, and the failure
+#       is the one reported. Results equal the staged develop's exactly.
+#
+#==============================================================================================
+
+## A value one thread sets and others wait on.
+struct Counter:
+    var value: @u32
+
+## How many sensor rows are decoded: the least of each producer's count.
+struct Progress:
+    var rows: @u32
+    var parts: Counter[16]
+    var count: usize
+    var aborted: @u32
+
+    ## `count` producers (strips or planes) will report.
+    mutating func producers(count: usize):
+        self.count = (usize)math.imin((i64)count, 16)
+
+    ## Producer `part` has decoded its share of the first `rows` rows.
+    mutating func publish(part: usize, rows: usize):
+        if part >= self.count:
+            return
+        self.parts[part].value.store((u32)rows)
+        var least: u32 = 0xffffffff
+        for i in 0..<self.count:
+            let done = self.parts[i].value.load()
+            least = done if done < least else least
+        discard(self.rows.max(least))
+        self.rows.wake(0)
+
+    ## Every row is decoded.
+    mutating func finish(rows: usize):
+        discard(self.rows.max((u32)rows))
+        self.rows.wake(0)
+
+    ## Wait for the first `rows` rows; false when the run was aborted.
+    mutating func await(rows: usize) -> bool:
+        while true:
+            let now = self.rows.load()
+            if self.aborted.load() != 0:
+                return false
+            if (usize)now >= rows:
+                return true
+            self.rows.wait(now)
+        return false
+
+## Wait for flag `flag` of a band; false when the run was aborted.
+func await_flag(flag: Counter*, progress: Progress*) -> bool:
+    while true:
+        let now = flag.value.load()
+        if progress.aborted.load() != 0:
+            return false
+        if now != 0:
+            return true
+        flag.value.wait(0)
+    return false
+
+## One pipelined develop: the stages' jobs, their done flags and the ranges.
+struct Pipeline:
+    var file: const u8[]
+    var meta: const Meta*
+    var mosaic: Mosaic*
+    var threads: usize
+    var progress: Progress
+    var levels: Levels*
+    var level_flags: Counter[]
+    var ranges: RangeJob*?
+    var range_flags: Counter[]
+    var tiles: Job*
+    var unpacked: @u64
+    var started: u64
+    var schedule: u32[]
+
+    ## Wake every waiter for good: the run failed.
+    mutating func abort():
+        self.progress.aborted.store(1)
+        self.progress.rows.store(0xffffffff)
+        self.progress.rows.wake(0)
+        for i in 0..<self.level_flags.length:
+            discard(self.level_flags[i].value.cas(0, 2, .seq_cst, .seq_cst))
+            self.level_flags[i].value.wake(0)
+        for i in 0..<self.range_flags.length:
+            discard(self.range_flags[i].value.cas(0, 2, .seq_cst, .seq_cst))
+            self.range_flags[i].value.wake(0)
+
+    ## Wait until the plane's first `rows` rows are leveled and, for X-Trans,
+    ## ranged; false when the run was aborted.
+    mutating func await_plane(rows: usize) -> bool:
+        if rows == 0:
+            return true
+        let last = (rows - 1) // band_rows
+        for i in 0..<(usize)math.imin((i64)last + 1, (i64)self.level_flags.length):
+            if not await_flag(&self.level_flags[i], &self.progress):
+                return false
+        if self.range_flags.length > 0:
+            let ranged = (rows - 1) // band_height
+            for i in 0..<(usize)math.imin((i64)ranged + 1, (i64)self.range_flags.length):
+                if not await_flag(&self.range_flags[i], &self.progress):
+                    return false
+        return true
+
+## Item `index` of a pipelined develop; `parallel` calls it.
+func pipeline_item(context: void*, index: usize, worker: usize) -> !:
+    let run = (Pipeline*)context
+    run_item(run, (usize)run.schedule[index], worker) catch failure:
+        run.abort()
+        error(failure.code, failure.message)
+
+## The work of item `index`: unpack, a level band, a range band or a tile
+## (items are numbered in that stage order; the schedule reorders them).
+func run_item(run: Pipeline*, index: usize, worker: usize) -> !:
+    let bands = run.level_flags.length
+    let ranged = run.range_flags.length
+    if index == 0:
+        try unpack_into(run.file, run.meta, run.mosaic, run.threads, &run.progress)
+        run.progress.finish(run.mosaic.height)
+        run.unpacked.store(time.now() - run.started)
+        return
+    if index <= bands:
+        let band = index - 1
+        if not run.progress.await(level_rows(run.levels, band)):
+            return
+        try level_band((void*)run.levels, band, worker)
+        run.level_flags[band].value.store(1)
+        run.level_flags[band].value.wake(0)
+        return
+    if index <= bands + ranged:
+        let band = index - 1 - bands
+        # A range band reads the hexagons up to three rows below it.
+        let rows = (usize)math.imin((i64)((band + 1) * band_height + 3), (i64)run.levels.plane.height)
+        let last = (rows - 1) // band_rows
+        for i in 0..<(usize)math.imin((i64)last + 1, (i64)bands):
+            if not await_flag(&run.level_flags[i], &run.progress):
+                return
+        if let ranges = run.ranges:
+            try ranges_band((void*)ranges, band, worker)
+        run.range_flags[band].value.store(1)
+        run.range_flags[band].value.wake(0)
+        return
+    let tile = index - 1 - bands - ranged
+    # A tile reads its rectangle and a margin (sixteen rows for X-Trans, six
+    # more for the green step), all within 32 rows.
+    let rows = source_rows(run.tiles, tile)
+    if not run.await_plane((usize)math.imin((i64)rows.end + 32, (i64)run.tiles.plane.height)):
+        return
+    try develop_item((void*)run.tiles, tile, worker)
+
+
+## Whether `meta`'s raw can develop through the pipeline: a coding that
+## reports rows, no masked black to measure, no curve to apply first, and a
+## sensor large enough for the X-Trans walk's plan.
+func pipelines(meta: const Meta*, threads: usize) -> bool:
+    let coded = meta.coding == .fuji or meta.coding == .crx
+    return coded and threads >= 4 and meta.curve.length == 0 and meta.width >= 128 and meta.height >= 128 and not (meta.mask[2] > meta.mask[0] and meta.mask[3] > meta.mask[1])
+
+## Develop `file` through the pipeline into tiles for `sink` (see `develop`),
+## filling `timings` when given.
+func develop_pipelined(file: const u8[], meta: const Meta*, look: const Development*, options: Options, threads: usize, context: void*?, sink: func(void*?, const Tile*) -> unit!, parsed: u64) -> !:
+    let started = time.now()
+    var mosaic = try Mosaic.create(meta.raw_width, meta.raw_height, meta.samples)
+    defer mosaic.close()
+    var plane = Plane()
+    defer plane.close()
+    var level_stage = LevelStage()
+    defer level_stage.close()
+    var levels = try level_stage.open(meta, &mosaic, look, options.crop, options.half, &plane, threads)
+    var develop_stage = DevelopStage()
+    defer develop_stage.close()
+    let gain = math.exp2(meta.baseline_exposure) if options.exposure else 1.0
+    var tiles = try develop_stage.open(&plane, look, options.quality, gain, meta.orientation, options.tile, options.alpha, threads, context, sink, false)
+    let level_flags = try new Counter[level_stage.bands] in memory.heap
+    defer free(level_flags) in memory.heap
+    var run = Pipeline(file = file, meta = meta, mosaic = &mosaic, threads = threads, levels = &levels, level_flags = level_flags, tiles = &tiles, started = started)
+    # X-Trans: the green ranges fill band by band from the walk's plan.
+    var plan = WalkPlan()
+    defer plan.close()
+    var ranges = RangeJob(plane = &plane, rings = &develop_stage.hexagons, plan = &plan)
+    var range_flags: Counter[]
+    defer release_flags(range_flags)
+    if tiles.hexagons != none:
+        # `pipelines` admits only planes large enough for a plan.
+        let found = try walk_plan(&plane, &develop_stage.hexagons) else error(invalid, "X-Trans plane too small to pipeline")
+        plan = found
+        range_flags = try new Counter[(plane.height + band_height - 1) // band_height] in memory.heap
+        run.range_flags = range_flags
+        run.ranges = &ranges
+    let count = 1 + level_flags.length + range_flags.length + develop_stage.count
+    run.schedule = try schedule(&run, count)
+    defer free(run.schedule) in memory.heap
+    try parallel(count, threads, (void*)&run, pipeline_item)
+    let finished = time.now()
+    if let timings = options.timings:
+        let unpacked = run.unpacked.load()
+        *timings = Timings(parse = parsed, unpack = unpacked, develop = finished - started - unpacked, demosaic = tiles.demosaic_ns.load(), output = tiles.output_ns.load(), total = parsed + finished - started)
+
+## The order items run in: the unpack, then for each level band in turn the
+## band, the range bands whose last level band it is, and the tiles likewise.
+func schedule(run: const Pipeline*, count: usize) -> u32[]!:
+    let bands = run.level_flags.length
+    let ranged = run.range_flags.length
+    let height = run.tiles.plane.height
+    # The last level band each item needs.
+    let needs = try new u32[count] in memory.heap
+    defer free(needs) in memory.heap
+    for band in 0..<ranged:
+        let rows = (usize)math.imin((i64)((band + 1) * band_height + 3), (i64)height)
+        needs[1 + bands + band] = (u32)((rows - 1) // band_rows)
+    for tile in 0..<count - 1 - bands - ranged:
+        let rows = (usize)math.imin((i64)source_rows(run.tiles, tile).end + 32, (i64)height)
+        needs[1 + bands + ranged + tile] = (u32)(((rows - 1) // band_rows) if rows > 0 else 0)
+    for band in 0..<bands:
+        needs[1 + band] = (u32)band
+    # A counting sort by that band keeps each stage's order within a band.
+    let offsets = try new usize[bands + 1] in memory.heap
+    defer free(offsets) in memory.heap
+    for i in 1..<count:
+        offsets[(usize)needs[i] + 1] += 1
+    for band in 0..<bands:
+        offsets[band + 1] += offsets[band]
+    let order = try new u32[count] in memory.heap
+    for i in 1..<count:
+        let band = (usize)needs[i]
+        order[1 + offsets[band]] = (u32)i
+        offsets[band] += 1
+    return order
+
+## Free band flags, if any.
+func release_flags(flags: Counter[]):
+    if flags.length > 0:
+        free(flags) in memory.heap

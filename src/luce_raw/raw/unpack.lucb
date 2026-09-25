@@ -38,23 +38,29 @@ struct Mosaic:
 func unpack(file: const u8[], meta: const Meta*, threads: usize) -> Mosaic!:
     var mosaic = try Mosaic.create(meta.raw_width, meta.raw_height, meta.samples)
     errdefer mosaic.close()
+    try unpack_into(file, meta, &mosaic, threads, none)
+    return mosaic
+
+## Read the sensor samples into `mosaic`, sized for them; the Fujifilm and
+## CRX decoders report rows as they finish them to `progress`.
+func unpack_into(file: const u8[], meta: const Meta*, mosaic_pointer: Mosaic*, threads: usize, progress: Progress*?) -> !:
+    let mosaic = mosaic_pointer
     match meta.coding:
-        .unpacked, .packed, .ljpeg, .deflate, .sony_ljpeg: try unpack_tiles(file, meta, &mosaic, threads)
-        .canon: try unpack_canon(file, meta, &mosaic, threads)
-        .nikon: try unpack_nikon(file, meta, &mosaic, threads)
-        .sony_arw2: try unpack_arw2(file, meta, &mosaic, threads)
-        .olympus: try unpack_olympus(file, meta, &mosaic)
-        .panasonic: try unpack_panasonic(file, meta, &mosaic)
-        .pentax: try unpack_pentax(file, meta, &mosaic)
-        .packed_little: try unpack_packed_little(file, meta, &mosaic)
-        .words: try unpack_words(file, meta, &mosaic)
-        .fuji: try unpack_fuji(file, meta, &mosaic, threads)
-        .crx: try unpack_crx(file, meta, &mosaic, threads)
+        .unpacked, .packed, .ljpeg, .deflate, .sony_ljpeg: try unpack_tiles(file, meta, mosaic, threads)
+        .canon: try unpack_canon(file, meta, mosaic, threads)
+        .nikon: try unpack_nikon(file, meta, mosaic, threads)
+        .sony_arw2: try unpack_arw2(file, meta, mosaic, threads)
+        .olympus: try unpack_olympus(file, meta, mosaic)
+        .panasonic: try unpack_panasonic(file, meta, mosaic)
+        .pentax: try unpack_pentax(file, meta, mosaic)
+        .packed_little: try unpack_packed_little(file, meta, mosaic)
+        .words: try unpack_words(file, meta, mosaic)
+        .fuji: try unpack_fuji(file, meta, mosaic, threads, progress)
+        .crx: try unpack_crx(file, meta, mosaic, threads, progress)
         .unknown: error(unsupported, "raw sample coding is not supported")
     if meta.curve.length == 65536:
-        var job = Rows(file = file, meta = meta, mosaic = &mosaic)
+        var job = Rows(file = file, meta = meta, mosaic = mosaic)
         try parallel((mosaic.height + band_height - 1) // band_height, threads, (void*)&job, curve_band)
-    return mosaic
 
 ## Rows of the mosaic that one parallel item handles.
 let band_height: usize = 32
