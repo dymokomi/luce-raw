@@ -3,8 +3,9 @@
 #   raw/parallel - Independent work items on several threads
 #
 #   DESCRIPTION:
-#       parallel runs `work(context, index)` for every index below `count`, workers
-#       taking the next index from a shared counter. Items must write disjoint
+#       parallel runs `work(context, index, worker)` for every index below `count`,
+#       workers taking the next index from a shared counter; `worker` numbers the
+#       thread (below the thread count) so items can reuse per-worker scratch. Items must write disjoint
 #       memory. The first failure stops further items and is returned once every
 #       worker has finished, so a corrupt tile reports its own error.
 #
@@ -13,7 +14,7 @@
 ## The shared state of one parallel run.
 struct Run:
     var context: void*
-    var work: func(void*, usize) -> unit!
+    var work: func(void*, usize, usize) -> unit!
     var count: usize
     var next: @usize
     var failed: @bool
@@ -21,6 +22,7 @@ struct Run:
 ## One worker's share: how it ended.
 struct Share:
     var run: Run*?
+    var worker: usize
     var failure: Error?
 
 func run_worker(raw: void*?):
@@ -30,21 +32,26 @@ func run_worker(raw: void*?):
         let index = job.next.add(1, .relaxed)
         if index >= job.count:
             return
-        job.work(job.context, index) catch failure:
+        job.work(job.context, index, share.worker) catch failure:
             share.failure = failure
             job.failed.store(true, .release)
             return
 
-## Run `work(context, index)` for each index below `count` on up to `threads`
-## threads (the caller's among them).
-func parallel(count: usize, threads: usize, context: void*, work: func(void*, usize) -> unit!) -> !:
+## How many threads `parallel` uses for `count` items on `threads`: worker
+## numbers stay below it.
+func workers(count: usize, threads: usize) -> usize:
+    return (usize)math.imin(math.imin(math.imax((i64)threads, 1), 64), (i64)math.imax((i64)count, 1))
+
+## Run `work(context, index, worker)` for each index below `count` on up to
+## `threads` threads (the caller's among them).
+func parallel(count: usize, threads: usize, context: void*, work: func(void*, usize, usize) -> unit!) -> !:
     var job = Run(context = context, work = work, count = count)
-    let n = (usize)math.imin(math.imin(math.imax((i64)threads, 1), 64), (i64)math.imax((i64)count, 1))
+    let n = workers(count, threads)
     var shares: Share[64]
     var handles: thread.Handle[64]
     var started: usize = 0
     for i in 0..<n:
-        shares[i] = Share(run = &job)
+        shares[i] = Share(run = &job, worker = i)
     for i in 1..<n:
         handles[started] = thread.spawn(run_worker, (void*)&shares[i], name = "luce-raw") catch failure:
             break

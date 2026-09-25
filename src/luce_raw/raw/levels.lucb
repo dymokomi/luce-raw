@@ -63,34 +63,109 @@ struct Levels:
 
 let band_rows: usize = 64
 
+## Developed row `y` (every sample of it, `width` pixels) balanced and clipped
+## to 16 bits into `out`: the sample less its black level (the repeating
+## pattern and DNG's row and column deltas), times its color's scale.
+func level_row(job: const Levels*, y: usize, width: usize, out: noalias u16*):
+    let meta = job.meta
+    let nc = meta.samples
+    let columns = meta.black_columns
+    let ay = job.oy + y
+    let source = job.mosaic.data.data + ((meta.top + ay) * job.mosaic.width + meta.left + job.ox) * nc
+    let blacks = &meta.black[(ay % meta.black_rows) * columns * nc]
+    let colors = &meta.pattern[(ay % 6) * 6]
+    let row_delta = job.vertical[ay] if job.vertical.length > 0 else 0.0
+    let deltas = job.horizontal.length > 0
+    let scale0 = job.scales[0]
+    let scale1 = job.scales[1]
+    let scale2 = job.scales[2]
+    var column = job.ox % columns
+    var phase = job.ox % 6
+    var at: usize = 0
+    for x in 0..<width:
+        let column_delta = job.horizontal[job.ox + x] if deltas else 0.0
+        for s in 0..<nc:
+            let color = s if nc == 3 else (usize)colors[phase]
+            let scale = scale0 if color == 0 else scale1 if color == 1 else scale2
+            let value = ((f64)source[at] - (blacks[column *% nc +% s] + row_delta + column_delta)) * scale
+            out[at] = 65535 if value >= 65535.0 else (u16)value if value > 0.0 else 0
+            at +%= 1
+        column = 0 if column + 1 == columns else column + 1
+        phase = 0 if phase == 5 else phase + 1
+
 ## Normalize rows [64 × index, 64 × index + 64) of the plane; `parallel` calls it.
-func normalize_band(context: void*, index: usize) -> !:
+func normalize_band(context: void*, index: usize, worker: usize) -> !:
+    let job = (Levels*)context
+    let plane = job.plane
+    let row = plane.width * plane.channels
+    let end = math.imin((i64)((index + 1) * band_rows), (i64)plane.height)
+    for y in index * band_rows..<(usize)end:
+        level_row(job, y, plane.width, plane.data.data + y * row)
+
+## Rows [64 × index, 64 × index + 64) of a half-size plane; `parallel` calls it.
+func half_band(context: void*, index: usize, worker: usize) -> !:
     let job = (Levels*)context
     let meta = job.meta
     let plane = job.plane
-    let nc = plane.channels
-    let width = plane.width
-    let rows = meta.black_rows
-    let columns = meta.black_columns
+    let nc = meta.samples
+    let width = plane.width * 2
+    let rows = try new u16[width * nc * 2] in memory.heap
+    defer free(rows) in memory.heap
+    let upper = rows.data
+    let lower = rows.data + width * nc
     let end = math.imin((i64)((index + 1) * band_rows), (i64)plane.height)
     for y in index * band_rows..<(usize)end:
-        let ay = job.oy + y
-        let source = ((meta.top + ay) * job.mosaic.width + meta.left + job.ox) * nc
-        let target = y * width * nc
-        let row_black = (ay % rows) * columns
-        let row_delta = job.vertical[ay] if job.vertical.length > 0 else 0.0
-        for x in 0..<width:
-            let ax = job.ox + x
-            let pattern = (row_black + ax % columns) * nc
-            let column_delta = job.horizontal[ax] if job.horizontal.length > 0 else 0.0
-            for s in 0..<nc:
-                let color = s if nc == 3 else (usize)meta.pattern[(ay % 6) * 6 + ax % 6]
-                let black = meta.black[pattern + s] + row_delta + column_delta
-                let value = ((f64)job.mosaic.data[source + x * nc + s] - black) * job.scales[color]
-                plane.data[target + x * nc + s] = 65535 if value >= 65535.0 else u16(value) if value > 0.0 else 0
+        level_row(job, 2 * y, width, upper)
+        level_row(job, 2 * y + 1, width, lower)
+        let row = plane.data[y * plane.width * 3..<(y + 1) * plane.width * 3]
+        let top = &meta.pattern[((job.oy + 2 * y) % 6) * 6]
+        let bottom = &meta.pattern[((job.oy + 2 * y + 1) % 6) * 6]
+        var missing = false
+        for x in 0..<plane.width:
+            var rgb: u32[3]
+            if nc == 3:
+                for s: usize in 0..<3:
+                    let a = 6 * x + s
+                    rgb[s] = ((u32)upper[a] + (u32)upper[a + 3] + (u32)lower[a] + (u32)lower[a + 3] + 2) >> 2
+            else:
+                # In scan order, as LibRaw lets the last sample of a color win.
+                var greens: u32 = 0
+                var seen: u8[3]
+                for i: usize in 0..<4:
+                    let px = 2 * x + i % 2
+                    let c = (usize)(top if i < 2 else bottom)[(job.ox + px) % 6]
+                    let value = (u32)(upper if i < 2 else lower)[px]
+                    if c == 1 and not meta.xtrans and seen[1] > 0:
+                        greens = value
+                    else:
+                        rgb[c] = value
+                    seen[c] += 1
+                if not meta.xtrans:
+                    rgb[1] = (rgb[1] + greens) >> 1
+                elif seen[0] == 0 and seen[2] == 0:
+                    missing = true
+            row[x * 3] = (u16)rgb[0]
+            row[x * 3 + 1] = (u16)rgb[1]
+            row[x * 3 + 2] = (u16)rgb[2]
+        # X-Trans cells of green alone take red and blue from either side.
+        if missing:
+            for x in 1..<plane.width - 1:
+                let px = 2 * x
+                let py = 2 * y
+                var colored = false
+                for i: usize in 0..<4:
+                    if meta.pattern[((job.oy + py + i // 2) % 6) * 6 + (job.ox + px + i % 2) % 6] != 1:
+                        colored = true
+                if not colored:
+                    row[x * 3] = (u16)(((u32)row[x * 3 - 3] + (u32)row[x * 3 + 3]) >> 1)
+                    row[x * 3 + 2] = (u16)(((u32)row[x * 3 - 1] + (u32)row[x * 3 + 5]) >> 1)
 
 ## The balanced Plane of `mosaic`'s active area, or of its default crop.
-func normalize(meta: const Meta*, mosaic: const Mosaic*, look: const Development*, crop: bool, threads: usize) -> Plane!:
+## With `half`, each 2×2 cell of it becomes one RGB pixel instead, as LibRaw's
+## half_size: red and blue as they are, the two greens of a Bayer cell averaged
+## (the last green of an X-Trans cell), and X-Trans cells without red or blue
+## given the mean of their left and right neighbours'.
+func normalize(meta: const Meta*, mosaic: const Mosaic*, look: const Development*, crop: bool, half: bool, threads: usize) -> Plane!:
     let ox = meta.crop_x if crop else 0
     let oy = meta.crop_y if crop else 0
     let width = meta.crop_width if crop else meta.width
@@ -98,7 +173,13 @@ func normalize(meta: const Meta*, mosaic: const Mosaic*, look: const Development
     let nc = meta.samples
     let count = width *? height else error(limit, "raw image size overflows")
     var plane = Plane(width = width, height = height, channels = nc)
-    plane.data = try new u16[count *? nc else error(limit, "raw image size overflows")] in memory.heap
+    if half:
+        plane.width = width // 2
+        plane.height = height // 2
+        plane.channels = 3
+        if plane.width == 0 or plane.height == 0:
+            error(invalid, "raw image is too small for half size")
+    plane.data = try new u16[plane.width * plane.height * plane.channels] in memory.heap
     errdefer plane.close()
     plane.xtrans = meta.xtrans
     for i: usize in 0..<36:
@@ -118,5 +199,9 @@ func normalize(meta: const Meta*, mosaic: const Mosaic*, look: const Development
         if span <= 0.0:
             error(corrupt, "raw white level is not above the black level")
         job.scales[c] = look.multipliers[c] * 65535.0 / span
-    try parallel((height + band_rows - 1) // band_rows, threads, (void*)&job, normalize_band)
+    if half:
+        try parallel((plane.height + band_rows - 1) // band_rows, threads, (void*)&job, half_band)
+        plane.xtrans = false
+    else:
+        try parallel((height + band_rows - 1) // band_rows, threads, (void*)&job, normalize_band)
     return plane

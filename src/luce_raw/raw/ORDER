@@ -40,5 +40,6 @@ xtrans_steps.lucb
 develop.lucb
 api.lucb
 recognize.lucb
+preview.lucb
 tests_codec.lucb
 tests_dng.lucb

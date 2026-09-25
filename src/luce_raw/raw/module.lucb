@@ -38,6 +38,7 @@
 #       develop.lucb   tiles through demosaic, matrix and orientation into the Raster
 #       api.lucb       detect, probe, decode, info, white balance and sensor
 #       recognize.lucb which files are camera raws at all
+#       preview.lucb   the largest embedded JPEG
 #       tests_codec.lucb  bit reader, Huffman and lossless JPEG tests
 #       tests_dng.lucb    synthetic DNG decoding, white balance and fuzzing tests
 #
@@ -54,6 +55,7 @@ import memory
 import math
 import thread
 import os
+import time
 import binary
 import compress
 import testing
@@ -78,8 +80,12 @@ pub struct WhiteBalance:
 ## How to develop a raw. A zero `temperature` keeps the as-shot white balance;
 ## otherwise `temperature` and `tint` choose it. `exposure` applies the file's
 ## baseline exposure; `crop` applies the camera's default crop; `camera` skips
-## the color matrix, leaving white-balanced camera RGB (for profiling); `threads`
-## zero means one per processor.
+## the color matrix, leaving white-balanced camera RGB (for profiling); `half`
+## develops at half size without demosaicing, one pixel per 2×2 filter cell (as
+## LibRaw's half_size), for fast previews; `threads` zero means one per
+## processor. `tile` and `alpha` shape `develop`'s tiles: their side in pixels,
+## and RGBA with alpha one instead of RGB. `timings`, when set, receives how
+## long each stage took.
 pub struct Options:
     pub var quality: Quality = .best
     pub var temperature: f64 = 0.0
@@ -87,7 +93,36 @@ pub struct Options:
     pub var exposure: bool = true
     pub var crop: bool = true
     pub var camera: bool = false
+    pub var half: bool = false
     pub var threads: usize = 0
+    pub var tile: usize = 256
+    pub var alpha: bool = false
+    pub var timings: Timings*? = none
+
+## One tile of a developed image, as `develop` hands it to its sink: the
+## rectangle at (`x`, `y`) of `width` × `height` pixels, `channels` (3 for RGB,
+## 4 for RGBA with alpha one) float32 values each, straight and linear, rows
+## packed. `pixels` is valid only during the sink call.
+pub struct Tile:
+    pub var x: usize
+    pub var y: usize
+    pub var width: usize
+    pub var height: usize
+    pub var channels: usize
+    pub var pixels: const f32[]
+
+## How long a develop took, in nanoseconds: parsing, unpacking the sensor
+## data, levels (black, white, white balance), and the develop proper (wall
+## time); within it, `demosaic` and `output` (color matrix, gain, orientation
+## and the sink) summed over the worker threads.
+pub struct Timings:
+    pub var parse: u64
+    pub var unpack: u64
+    pub var levels: u64
+    pub var develop: u64
+    pub var demosaic: u64
+    pub var output: u64
+    pub var total: u64
 
 ## What a raw file is: its format ("DNG", "CR2", "NEF", "ARW", "ORF", "RW2",
 ## "PEF" or "RAF"), camera, sensor and developed sizes, the as-shot white

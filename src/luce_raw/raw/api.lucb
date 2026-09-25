@@ -80,11 +80,22 @@ func starts(text: str, prefix: str) -> bool:
             return false
     return true
 
-## The developed size of `meta`: crop or active area, then orientation.
-func developed_size(meta: const Meta*, crop: bool) -> (usize, usize):
-    let w = meta.crop_width if crop else meta.width
-    let h = meta.crop_height if crop else meta.height
-    return (h, w) if meta.orientation >= 5 else (w, h)
+## The developed size of `meta`: crop or active area, halved for `half`, then
+## orientation.
+func developed_size(meta: const Meta*, crop: bool, half: bool) -> (usize, usize):
+    var w = meta.crop_width if crop else meta.width
+    var h = meta.crop_height if crop else meta.height
+    if half:
+        w = w // 2
+        h = h // 2
+    return (h, w) if meta.orientation >= 5 and meta.orientation <= 8 else (w, h)
+
+## The size `develop` (or `decode`) gives `data` with `options`: width and
+## height after crop, half size and orientation.
+pub func dimensions(data: const u8[], options: Options = Options()) -> (usize, usize)!:
+    var meta = try parse(data)
+    defer meta.close()
+    return developed_size(&meta, options.crop, options.half)
 
 ## What `data` is: format, camera, sizes, as-shot white balance, baseline
 ## exposure and the color matrix's source. The strings view `data`.
@@ -92,7 +103,7 @@ pub func info(data: const u8[]) -> Info!:
     var meta = try parse(data)
     defer meta.close()
     let look = try development(&meta, 0.0, 0.0)
-    let (w, h) = developed_size(&meta, true)
+    let (w, h) = developed_size(&meta, true, false)
     return Info(format = meta.format, make = meta.make, model = meta.model, raw_width = meta.raw_width, raw_height = meta.raw_height, width = w, height = h, bits = meta.bits, as_shot = look.balance, baseline_exposure = meta.baseline_exposure, matrix = meta.matrix, orientation = meta.orientation)
 
 ## The white balance of `data`'s camera at `temperature` (kelvin) and `tint`:
@@ -113,7 +124,7 @@ pub func probe(image: Raster*, options: Options = Options()) -> !:
     defer meta.close()
     if image.frame != 0:
         error(invalid, "raw files have one frame")
-    let (w, h) = developed_size(&meta, options.crop)
+    let (w, h) = developed_size(&meta, options.crop, options.half)
     image.width = w
     image.height = h
     image.bits = 32
@@ -129,29 +140,61 @@ pub func probe(image: Raster*, options: Options = Options()) -> !:
 ## linear sRGB with `options`. `probe` must have sized the image with the same
 ## options.
 pub func decode(image: Raster*, options: Options = Options()) -> !:
-    if options.temperature != 0.0 and (options.temperature < 1667.0 or options.temperature > 50000.0 or options.tint < -150.0 or options.tint > 150.0):
-        error(invalid, "temperature must be 1667-50000 K and tint within ±150")
     var meta = try parse(image.encoded)
     defer meta.close()
-    let (w, h) = developed_size(&meta, options.crop)
+    let (w, h) = developed_size(&meta, options.crop, options.half)
     if image.width != w or image.height != h or image.channels.length != 3:
         error(invalid, "raw image was not probed with these options")
     if image.pixels.length == 0:
         try image.allocate()
     if image.pixels.length != w * h * 3:
         error(invalid, "raw image pixels have the wrong size")
+    var settings = options
+    settings.alpha = false
+    try develop((const u8[])image.encoded, settings, (void*)image, raster_sink)
+
+## Copy one tile into the Raster `context`.
+func raster_sink(context: void*?, tile: const Tile*) -> !:
+    let image = (Raster*)(context else return)
+    let pixels = image.pixels.data
+    let source = tile.pixels.data
+    for y in 0..<tile.height:
+        let target = pixels + ((tile.y + y) * image.width + tile.x) * 3
+        let row = source + y * tile.width * 3
+        for i in 0..<tile.width * 3:
+            target[i] = (f64)row[i]
+
+## Develop `data` with `options` into tiles of the developed image (the size
+## `dimensions` answers), handing each to `sink(context, tile)` as it is
+## finished. Tiles are `options.tile` pixels square (smaller at the right and
+## bottom edges), aligned to multiples of it, float32 RGB or RGBA in linear
+## sRGB (or camera RGB with `camera`). The sink runs on worker threads, several
+## at once and in no particular order; a failure it returns stops the develop
+## and is returned.
+pub func develop(data: const u8[], options: Options, context: void*?, sink: func(void*?, const Tile*) -> unit!) -> !:
+    if options.temperature != 0.0 and (options.temperature < 1667.0 or options.temperature > 50000.0 or options.tint < -150.0 or options.tint > 150.0):
+        error(invalid, "temperature must be 1667-50000 K and tint within ±150")
+    let t0 = time.now()
+    var meta = try parse(data)
+    defer meta.close()
     var look = try development(&meta, options.temperature, options.tint)
     if options.camera:
         look.to_rgb = diagonal([1.0, 1.0, 1.0])
     let threads = options.threads if options.threads > 0 else (usize)os.cpus()
-    var mosaic = try unpack(image.encoded, &meta, threads)
+    let t1 = time.now()
+    var mosaic = try unpack(data, &meta, threads)
     defer mosaic.close()
     meta.measure_black(&mosaic)
-    var plane = try normalize(&meta, &mosaic, &look, options.crop, threads)
+    let t2 = time.now()
+    var plane = try normalize(&meta, &mosaic, &look, options.crop, options.half, threads)
     defer plane.close()
     mosaic.close()
+    let t3 = time.now()
     let gain = math.exp2(meta.baseline_exposure) if options.exposure else 1.0
-    try develop_plane(&plane, &look, image, options.quality, gain, meta.orientation, threads)
+    let (demosaic_ns, output_ns) = try develop_plane(&plane, &look, options.quality, gain, meta.orientation, options.tile, options.alpha, threads, context, sink)
+    let t4 = time.now()
+    if let timings = options.timings:
+        *timings = Timings(parse = t1 - t0, unpack = t2 - t1, levels = t3 - t2, develop = t4 - t3, demosaic = demosaic_ns, output = output_ns, total = t4 - t0)
 
 ## A raw's sensor samples after the file's linearization, with the facts that
 ## normalize them: for inspecting a raw or checking a decoder against another.

@@ -1,0 +1,150 @@
+#==============================================================================================
+#
+#   raw/preview - The largest JPEG a raw file carries
+#
+#   DESCRIPTION:
+#       Cameras embed JPEG renderings of the picture for their own screens, from
+#       thumbnails to full size. preview gathers every candidate the format keeps
+#       (TIFF directories' JPEG interchange and JPEG-compressed strips, SubIFDs
+#       included; Olympus' camera settings, Panasonic's JpgFromRaw, CR3's JPEG
+#       track, RAF's header), reads each one's frame header for its size, and
+#       answers the largest. Nothing is decoded, so it costs a directory walk.
+#
+#==============================================================================================
+
+## An embedded JPEG: `jpeg` views the raw file's bytes; `width` and `height`
+## are the JPEG's own (before orientation); `orientation` is the raw's EXIF
+## orientation (1 to 8), which the JPEG's pixels also need.
+pub struct Preview:
+    pub var jpeg: const u8[]
+    pub var width: usize
+    pub var height: usize
+    pub var orientation: u64
+
+## The largest JPEG preview embedded in `data`, or none when it has none.
+pub func preview(data: const u8[]) -> Preview?!:
+    var best = Preview(orientation = 1)
+    if data.length < 16:
+        error(corrupt, "raw file is truncated")
+    if (str)data[..<8] == "FUJIFILM":
+        var header = Reader(data = data, position = 84, little = false)
+        let offset = try header.uint(4)
+        let length = try header.uint(4)
+        consider(&best, data, offset, length)
+    elif is_cr3(data):
+        var walk = Cr3Walk()
+        try cr3_boxes(data, 0, data.length, 0, &walk)
+        for i in 0..<walk.count:
+            let track = walk.tracks[i]
+            if not track.raw:
+                consider(&best, data, track.offset, track.size)
+    else:
+        let tree = try Tree.walk(data, 0, 0)
+        for i in 0..<tree.count:
+            let directory = try tree.at(i)
+            try tiff_previews(&best, data, &directory)
+        if let exif = tree.exif:
+            try olympus_preview(&best, data, &exif)
+    if best.jpeg.length == 0:
+        return none
+    # The raw's orientation; a file this package cannot develop still says it.
+    var meta = parse(data) catch failure:
+        best.orientation = 1
+        return best
+    best.orientation = meta.orientation if meta.orientation >= 1 and meta.orientation <= 8 else 1
+    meta.close()
+    return best
+
+## The JPEGs one TIFF directory points to.
+func tiff_previews(best: Preview*, file: const u8[], directory: const Directory*) -> !:
+    if let start = try directory.find(513):
+        if let length = try directory.find(514):
+            consider(best, file, try directory.locate(try start.uint(0)), try length.uint(0))
+    let compression = try directory.uint(259)
+    if compression == 6 or compression == 7:
+        if let offsets = try directory.find(273):
+            if let counts = try directory.find(279):
+                if offsets.count == 1 and counts.count == 1:
+                    consider(best, file, try directory.locate(try offsets.uint(0)), try counts.uint(0))
+    # Panasonic's JpgFromRaw holds the JPEG as the tag's own bytes.
+    if let embedded = try directory.find(0x2e):
+        consider(best, file, (u64)embedded.position, (u64)embedded.data.length)
+
+## Olympus keeps its preview in the maker note's camera settings (0x2020):
+## PreviewImageStart (0x101) and PreviewImageLength (0x102).
+func olympus_preview(best: Preview*, file: const u8[], exif: const Directory*) -> !:
+    let note = try exif.find(37500) else return
+    var start: usize = 0
+    var base: i64 = 0
+    if note.data.length > 16 and (str)note.data[..<8] == "OLYMPUS\0":
+        start = note.position + 12
+        base = (i64)note.position
+    elif note.data.length > 16 and (str)note.data[..<6] == "OLYMP\0":
+        start = note.position + 8
+    else:
+        return
+    let maker = Directory.open(file, base, start, exif.little) catch failure:
+        return
+    let pointer = try maker.find(0x2020) else return
+    let settings = maker.child(try pointer.uint(0)) catch failure:
+        return
+    let offset = try settings.uint(0x101)
+    let length = try settings.uint(0x102)
+    if offset > 0 and length > 0:
+        consider(best, file, try settings.locate(offset), length)
+
+## Take the JPEG of `length` bytes at `offset` of `file` as `best` when it is
+## a baseline or progressive JPEG larger than `best`.
+func consider(best: Preview*, file: const u8[], offset: u64, length: u64):
+    if length < 4 or offset >= (u64)file.length or length > (u64)file.length - offset:
+        return
+    let jpeg = file[(usize)offset..<(usize)(offset + length)]
+    let (width, height) = jpeg_size(jpeg)
+    if width == 0:
+        return
+    let area = width * height
+    let current = best.width * best.height
+    if area > current or (area == current and jpeg.length > best.jpeg.length):
+        best.jpeg = jpeg
+        best.width = width
+        best.height = height
+
+## The size in a JPEG's frame header, or (0, 0) when `jpeg` is not a
+## baseline, extended or progressive JPEG.
+func jpeg_size(jpeg: const u8[]) -> (usize, usize):
+    if jpeg[0] != 0xff or jpeg[1] != 0xd8:
+        return (0, 0)
+    var at: usize = 2
+    while at + 9 < jpeg.length:
+        if jpeg[at] != 0xff:
+            return (0, 0)
+        let marker = jpeg[at + 1]
+        if marker == 0xff:
+            at += 1
+            continue
+        if marker == 0xd9 or marker == 0xda:
+            return (0, 0)
+        let length = ((usize)jpeg[at + 2] << 8) | (usize)jpeg[at + 3]
+        if marker == 0xc0 or marker == 0xc1 or marker == 0xc2:
+            let height = ((usize)jpeg[at + 5] << 8) | (usize)jpeg[at + 6]
+            let width = ((usize)jpeg[at + 7] << 8) | (usize)jpeg[at + 8]
+            return (width, height) if width > 0 and height > 0 else (0, 0)
+        if marker >= 0xc3 and marker <= 0xcf and marker != 0xc4 and marker != 0xc8 and marker != 0xcc:
+            return (0, 0)
+        if length < 2:
+            return (0, 0)
+        at += 2 + length
+    return (0, 0)
+
+test "jpeg_size reads a frame header and refuses lossless JPEG":
+    let baseline: u8[24] = [0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 11, 8, 0x01, 0x20, 0x02, 0x40, 1, 1, 0x11, 0, 0xff, 0xd9, 0]
+    let (w, h) = jpeg_size(baseline[0..])
+    assert(w == 576 and h == 288, "frame size differs")
+    var lossless = baseline
+    lossless[9] = 0xc3
+    let (lw, lh) = jpeg_size(lossless[0..])
+    assert(lw == 0 and lh == 0, "a lossless JPEG passed as a preview")
+    var none_found = baseline
+    none_found[1] = 0xd9
+    let (nw, nh) = jpeg_size(none_found[0..])
+    assert(nw == 0 and nh == 0, "a non-JPEG passed as a preview")

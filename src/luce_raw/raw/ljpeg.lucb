@@ -68,7 +68,11 @@ struct LosslessJpeg:
                     var total: usize = 0
                     for n in counts:
                         total += (usize)n
-                    let table = try Huffman.build(counts, try segment.take(total))
+                    let symbols = try segment.take(total)
+                    for symbol in symbols:
+                        if symbol > 16:
+                            error(corrupt, "lossless JPEG difference category above 16")
+                    let table = try Huffman.build(counts, symbols)
                     jpeg.tables[target].close()
                     jpeg.tables[target] = table
             elif code == 0xdd:
@@ -114,27 +118,61 @@ struct LosslessJpeg:
             first = true
         let nc = self.components
         let base: i32 = (i32)1 << (self.precision - 1)
-        # The reader and tables live in locals for the line: the hot loop then
-        # touches no field of `self`.
-        var reader = self.reader
-        var tables: (const Huffman*)[4] = [&self.tables[self.selectors[0]], &self.tables[self.selectors[1 if nc > 1 else 0]], &self.tables[self.selectors[2 if nc > 2 else 0]], &self.tables[self.selectors[3 if nc > 3 else 0]]]
-        for c in 0..<nc:
-            let delta = try difference(&reader, tables[c])
-            let prediction = base if first else (i32)above[c]
-            current[c] = (u16)((prediction + delta) & 65535)
         let p = self.predictor
-        if first or p == 1:
-            for at in nc..<samples:
-                let delta = try difference(&reader, tables[at % nc])
-                current[at] = (u16)(((i32)current[at - nc] + delta) & 65535)
-        else:
-            for at in nc..<samples:
-                let delta = try difference(&reader, tables[at % nc])
-                let a = (i32)current[at - nc]
-                let b = (i32)above[at]
-                let d = (i32)above[at - nc]
-                let prediction = b if p == 2 else d if p == 3 else a + b - d if p == 4 else a + ((b - d) >> 1) if p == 5 else b + ((a - d) >> 1) if p == 6 else (a + b) >> 1
-                current[at] = (u16)((prediction + delta) & 65535)
+        # The bit buffer lives in locals for the line and the tables are
+        # pointers, so the loop touches no field of `self`; `open` checked that
+        # every symbol is a category of at most 16.
+        var reader = self.reader
+        var buffer = reader.buffer
+        var count = reader.count
+        var tables: (const u16*)[4] = ---
+        var widths: u32[4]
+        for c: usize in 0..<4:
+            let table = &self.tables[self.selectors[c if c < nc else 0]]
+            tables[c] = table.table.data
+            widths[c] = 64 - table.bits
+        let out = current.data
+        let prior = above.data
+        var c: usize = 0
+        for at in 0..<samples:
+            if count < 32:
+                reader.buffer = buffer
+                reader.count = count
+                reader.fill()
+                buffer = reader.buffer
+                count = reader.count
+            let entry = tables[c][buffer >> widths[c]]
+            if entry == 0:
+                error(corrupt, "invalid Huffman code in raw data")
+            let length = (u32)(entry >> 8)
+            let category = (u32)(entry & 255)
+            var delta: i32 = 0
+            var used = length
+            if category == 16:
+                delta = -32768
+            elif category > 0:
+                let value = (i32)((buffer << length) >> (64 - category))
+                delta = value if value >= ((i32)1 << (category - 1)) else value -% ((i32)1 << category) +% 1
+                used = length + category
+            buffer = buffer << used
+            count -= used
+            var prediction = base
+            if at < nc:
+                if not first:
+                    prediction = (i32)prior[at]
+            elif first or p == 1:
+                prediction = (i32)out[at - nc]
+            else:
+                let a = (i32)out[at - nc]
+                let b = (i32)prior[at]
+                let d = (i32)prior[at - nc]
+                prediction = b if p == 2 else d if p == 3 else a +% b -% d if p == 4 else a +% ((b -% d) >> 1) if p == 5 else b +% ((a -% d) >> 1) if p == 6 else (a +% b) >> 1
+            out[at] = (u16)((prediction +% delta) & 65535)
+            c = 0 if c + 1 == nc else c + 1
+        reader.buffer = buffer
+        reader.count = count
+        if count < reader.padding:
+            error(corrupt, "raw bit stream is truncated")
         self.reader = reader
         self.line += 1
         return current

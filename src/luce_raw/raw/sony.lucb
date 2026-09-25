@@ -158,12 +158,23 @@ func unpack_sony_ljpeg_tile(data: const u8[], mosaic: Mosaic*, x0: usize, y0: us
 
 ## ARW2: rows of 16-byte blocks, each sixteen pixels of one color two apart.
 ## Samples are stored as tone curve indexes; unpack applies the curve.
-func unpack_arw2(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
-    let data = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size)
+func unpack_arw2(file: const u8[], meta: const Meta*, mosaic: Mosaic*, threads: usize) -> !:
+    var job = Rows(file = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size), meta = meta, mosaic = mosaic)
+    try parallel((mosaic.height + band_height - 1) // band_height, threads, (void*)&job, arw2_band)
+
+## Rows [band_height × index, …) of an ARW2 mosaic; rows are independent.
+func arw2_band(context: void*, index: usize, worker: usize) -> !:
+    let job = (Rows*)context
+    let data = job.file
+    let mosaic = job.mosaic
     let w = mosaic.width
     var pixels: u16[16]
-    for y in 0..<mosaic.height:
+    let end = math.imin((i64)((index + 1) * band_height), (i64)mosaic.height)
+    for y in index * band_height..<(usize)end:
+        if (y + 1) * w > data.length:
+            return
         let row = data[y * w..<(y + 1) * w]
+        let target = mosaic.data.data + y * w
         var x: usize = 0
         var at: usize = 0
         while x + 30 < w and at + 16 <= row.length:
@@ -176,22 +187,25 @@ func unpack_arw2(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
             var shift: u32 = 0
             while shift < 4 and ((i32)0x80 << (i32)shift) <= (i32)high - (i32)low:
                 shift += 1
-            var bit: usize = 30
+            # Two bytes beyond the block let the last step read a pair; a
+            # corrupt block naming one position for both extremes has a
+            # fifteenth step, which then reads zeros.
+            var bytes: u8[18]
+            memory.copy(bytes[..<16], block, 16)
+            var bit: u32 = 30
             for i: usize in 0..<16:
                 if i == high_at:
                     pixels[i] = (u16)high
                 elif i == low_at:
                     pixels[i] = (u16)low
                 else:
-                    # A corrupt block naming one position for both extremes has a
-                    # fifteenth step, past its sixteen bytes: it reads as zeros.
-                    let at_byte = bit >> 3
-                    let pair = ((u32)block[at_byte] if at_byte < 16 else 0) | ((u32)(block[at_byte + 1] if at_byte + 1 < 16 else 0) << 8)
-                    let value = (((pair >> (u32)(bit & 7)) & 0x7f) << shift) + low
+                    let at_byte = (usize)(bit >> 3)
+                    let pair = (u32)bytes[at_byte] | ((u32)bytes[at_byte + 1] << 8)
+                    let value = (((pair >> (bit & 7)) & 0x7f) << shift) +% low
                     pixels[i] = (u16)(value if value < 0x7ff else 0x7ff)
-                    bit += 7
+                    bit +%= 7
             for i: usize in 0..<16:
-                mosaic.data[y * w + x] = pixels[i] << 1
-                x += 2
+                target[x] = pixels[i] << 1
+                x +%= 2
             x -= 1 if (x & 1) == 1 else 31
             at += 16

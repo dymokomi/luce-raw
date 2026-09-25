@@ -91,12 +91,15 @@ def best_alignment(ours, theirs):
     return best[1], best[2]
 
 
-def check_develop(sample, out, matrix, space):
-    subprocess.run([DRIVER, "develop", sample, out, "best", "0", "0", space], check=True)
+def check_develop(sample, out, matrix, space, mode="best"):
+    """Our develop against LibRaw's: `mode` best (AHD, or Markesteijn for
+    X-Trans), fast (bilinear) or half (half_size, no demosaic)."""
+    subprocess.run([DRIVER, "develop", sample, out, mode, "0", "0", space], check=True)
     w, h = map(int, header(out)[:2])
     ours = np.fromfile(out, dtype=np.float32).reshape(h, w, 3)
     with rawpy.imread(str(sample)) as r:
-        theirs = r.postprocess(demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD, use_camera_wb=True,
+        algorithm = rawpy.DemosaicAlgorithm.LINEAR if mode == "fast" else rawpy.DemosaicAlgorithm.AHD
+        theirs = r.postprocess(demosaic_algorithm=algorithm, half_size=mode == "half", use_camera_wb=True,
                                output_color=rawpy.ColorSpace.raw if space == "camera" else rawpy.ColorSpace.sRGB, gamma=(1, 1), no_auto_bright=True,
                                output_bps=16, highlight_mode=rawpy.HighlightMode.Clip,
                                adjust_maximum_thr=0.0, user_sat=None, bright=1.0)
@@ -113,7 +116,36 @@ def check_develop(sample, out, matrix, space):
     outliers = float(np.mean(diff.max(axis=2) > 0.05))
     kind = "camera" if space == "camera" else matrix
     ok = mean <= MEAN_LIMIT[kind] and outliers <= OUTLIER_LIMIT[kind]
-    return ok, f"{space} mean |diff| {mean:.5f}, >0.05 in {outliers * 100:.3f}%"
+    return ok, f"{mode} {space} mean |diff| {mean:.5f}, >0.05 in {outliers * 100:.3f}%"
+
+
+def jpeg_area(data):
+    """Width × height from a JPEG's frame header, or 0."""
+    at = 2
+    while at + 9 < len(data) and data[at] == 0xFF:
+        marker = data[at + 1]
+        if marker in (0xC0, 0xC1, 0xC2):
+            return int.from_bytes(data[at + 5:at + 7], "big") * int.from_bytes(data[at + 7:at + 9], "big")
+        at += 2 + int.from_bytes(data[at + 2:at + 4], "big")
+    return 0
+
+
+def check_preview(sample, out):
+    """Our largest embedded JPEG against LibRaw's thumbnail: the same JPEG (LibRaw
+    may insert an EXIF segment after its start marker) or a larger one."""
+    text = subprocess.run([DRIVER, "preview", sample, out], check=True, capture_output=True, text=True).stdout.split()
+    try:
+        with rawpy.imread(str(sample)) as r:
+            thumb = r.extract_thumb()
+    except rawpy.LibRawNoThumbnailError:
+        return text[1] == "none", f"preview {text[1]} (LibRaw none)"
+    if text[1] == "none":
+        return False, "no preview, LibRaw has one"
+    ours = Path(out).read_bytes()
+    theirs = thumb.data if thumb.format == rawpy.ThumbFormat.JPEG else b""
+    same = theirs.endswith(ours[2:])
+    ok = same or jpeg_area(ours) >= jpeg_area(theirs)
+    return ok, f"preview {text[1]} in {text[9]} us{'' if same else ' (not LibRaw’s)'}"
 
 
 def main():
@@ -129,8 +161,11 @@ def main():
         ok1, text1 = check_sensor(sample, out.with_suffix(".sensor"))
         ok2, text2 = check_develop(sample, out.with_suffix(".cam"), matrix, "camera")
         ok3, text3 = check_develop(sample, out.with_suffix(".rgb"), matrix, "srgb")
-        good = ok1 and ok2 and ok3
-        print(f"{'ok  ' if good else 'FAIL'} {name} ({matrix} matrix): {text1}; {text2}; {text3}", flush=True)
+        ok4, text4 = check_develop(sample, out.with_suffix(".fast"), matrix, "camera", "fast")
+        ok5, text5 = check_develop(sample, out.with_suffix(".half"), matrix, "camera", "half")
+        ok6, text6 = check_preview(sample, out.with_suffix(".jpg"))
+        good = ok1 and ok2 and ok3 and ok4 and ok5 and ok6
+        print(f"{'ok  ' if good else 'FAIL'} {name} ({matrix} matrix): {text1}; {text2}; {text3}; {text4}; {text5}; {text6}", flush=True)
         if not good:
             failed.append(name)
     if failed:

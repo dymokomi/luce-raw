@@ -23,8 +23,20 @@ struct Bits:
     var marker: bool
 
     ## Top the buffer up to at least 57 bits, with zero padding past the data or
-    ## at a JPEG marker.
+    ## at a JPEG marker: eight bytes at once where no 0xFF hides among them,
+    ## byte by byte otherwise.
     mutating func fill():
+        if self.count <= 56 and not self.marker and self.position + 8 <= self.data.length:
+            let p = self.data.data + self.position
+            let word = ((u64)p[0] << 56) | ((u64)p[1] << 48) | ((u64)p[2] << 40) | ((u64)p[3] << 32) | ((u64)p[4] << 24) | ((u64)p[5] << 16) | ((u64)p[6] << 8) | (u64)p[7]
+            let inverse = ~word
+            if not self.stuffed or ((inverse -% 0x0101010101010101) & ~inverse & 0x8080808080808080) == 0:
+                let take = (64 - self.count) >> 3
+                let bits = take * 8
+                self.buffer |= (word >> (64 - bits)) << (64 - self.count - bits)
+                self.position += (usize)take
+                self.count += bits
+                return
         while self.count <= 56:
             var byte: u64 = 0
             if not self.marker and self.position < self.data.length:

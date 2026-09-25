@@ -188,7 +188,7 @@ struct FujiJob:
     var q_bases: const u8[]
 
 ## Decode strip `block`; strips write disjoint columns, so `parallel` may run them at once.
-func fuji_strip(context: void*, block: usize) -> !:
+func fuji_strip(context: void*, block: usize, worker: usize) -> !:
     let job = (FujiJob*)context
     let params = job.params
     let lw = params.line_width

@@ -51,11 +51,15 @@ struct LabTable:
 inline func clip16(value: i64) -> usize:
     return 0 if value < 0 else 65535 if value > 65535 else (usize)value
 
+## A value clamped to 16-bit sample range.
+inline func clamp_sample(value: i32) -> u16:
+    return 0 if value < 0 else 65535 if value > 65535 else (u16)value
+
 ## `value` limited to the range its two neighbours span.
-inline func between(value: i64, a: i64, b: i64) -> i64:
+inline func between(value: i32, a: i32, b: i32) -> u16:
     let low = a if a < b else b
     let high = b if a < b else a
-    return low if value < low else high if value > high else value
+    return (u16)(low if value < low else high if value > high else value)
 
 ## Scratch for one tile: two directions of RGB, Lab and homogeneity over the
 ## tile and a three-pixel apron.
@@ -87,162 +91,184 @@ struct AhdScratch:
 ## pixels inside the plane; results go to `out` as RGB rows of `out_stride`
 ## pixels starting at (`ox`, `oy`) of `out`'s frame. The work arrays cover the
 ## rectangle and a three-pixel apron; direction 0 is horizontal, 1 vertical.
+## The kernels below index with pointers: every offset they form stays inside
+## the scratch (sized for the tile plus apron) or the plane (five pixels of
+## margin), which this function's bounds establish once.
 func ahd_tile(plane: const Plane*, table: const LabTable*, scratch: AhdScratch*, x0: usize, y0: usize, x1: usize, y1: usize, out: u16[], out_stride: usize, ox: usize, oy: usize):
     let tw = x1 - x0 + 6
     let th = y1 - y0 + 6
     let size = tw * th
-    let horizontal = scratch.rgb[..<size * 3]
-    let vertical = scratch.rgb[size * 3..<size * 6]
-    let lab_h = scratch.lab[..<size * 3]
-    let lab_v = scratch.lab[size * 3..<size * 6]
-    let homogeneous_h = scratch.homogeneity[..<size]
-    let homogeneous_v = scratch.homogeneity[size..<size * 2]
+    assert(size <= scratch.capacity and x0 >= 5 and y0 >= 5 and x1 + 5 <= plane.width and y1 + 5 <= plane.height)
+    assert((oy + y1 - y0 - 1) * out_stride + ox + x1 - x0 <= out.length // 3)
+    let horizontal = scratch.rgb.data
+    let vertical = scratch.rgb.data + size * 3
+    let lab_h = scratch.lab.data
+    let lab_v = scratch.lab.data + size * 3
+    let homogeneous_h = scratch.homogeneity.data
+    let homogeneous_v = scratch.homogeneity.data + size
     ahd_green(plane, horizontal, vertical, x0 - 3, y0 - 3, tw, th)
     ahd_red_blue(plane, table, horizontal, lab_h, x0 - 3, y0 - 3, tw, th)
     ahd_red_blue(plane, table, vertical, lab_v, x0 - 3, y0 - 3, tw, th)
     ahd_homogeneity(lab_h, lab_v, homogeneous_h, homogeneous_v, tw, th)
-    ahd_combine(horizontal, vertical, homogeneous_h, homogeneous_v, tw, th, out, out_stride, ox, oy)
+    ahd_combine(horizontal, vertical, homogeneous_h, homogeneous_v, tw, th, out.data + (oy * out_stride + ox) * 3, out_stride)
 
 ## Green at every red and blue pixel, interpolated along the row into
 ## `horizontal` and along the column into `vertical`, limited to the range of
 ## its two neighbours.
-func ahd_green(plane: const Plane*, horizontal: u16[], vertical: u16[], bx: usize, by: usize, tw: usize, th: usize):
+func ahd_green(plane: const Plane*, horizontal: noalias u16*, vertical: noalias u16*, bx: usize, by: usize, tw: usize, th: usize):
     let w = plane.width
-    let p = plane.data
+    let w2 = w * 2
     for ty in 0..<th:
         let y = by + ty
-        let row = y * w + bx
         let first = (y & 1) * 2
-        for tx in 0..<tw:
-            if plane.cfa[first + ((bx + tx) & 1)] == 1:
+        let source = plane.data.data + (y * w + bx)
+        let hrow = horizontal + (ty * tw * 3 + 1)
+        let vrow = vertical + (ty * tw * 3 + 1)
+        for parity: usize in 0..<2:
+            if plane.cfa[first + ((bx + parity) & 1)] == 1:
                 continue
-            let i = row + tx
-            let v = (i64)p[i]
-            let left = (i64)p[i - 1]
-            let right = (i64)p[i + 1]
-            let h = ((left + v + right) * 2 - (i64)p[i - 2] - (i64)p[i + 2]) >> 2
-            horizontal[(ty * tw + tx) * 3 + 1] = (u16)between(h, left, right)
-            let up = (i64)p[i - w]
-            let down = (i64)p[i + w]
-            let u = ((up + v + down) * 2 - (i64)p[i - 2 * w] - (i64)p[i + 2 * w]) >> 2
-            vertical[(ty * tw + tx) * 3 + 1] = (u16)between(u, up, down)
+            var tx = parity
+            while tx < tw:
+                let s = source + tx
+                let v = (i32)*s
+                let left = (i32)*(s - 1)
+                let right = (i32)*(s + 1)
+                let h = ((left +% v +% right) *% 2 -% (i32)*(s - 2) -% (i32)*(s + 2)) >> 2
+                hrow[tx *% 3] = between(h, left, right)
+                let up = (i32)*(s - w)
+                let down = (i32)*(s + w)
+                let u = ((up +% v +% down) *% 2 -% (i32)*(s - w2) -% (i32)*(s + w2)) >> 2
+                vrow[tx *% 3] = between(u, up, down)
+                tx +%= 2
 
 ## Red and blue from one direction's green, and the CIELAB of the result.
-func ahd_red_blue(plane: const Plane*, table: const LabTable*, rgb: u16[], lab: i32[], bx: usize, by: usize, tw: usize, th: usize):
+func ahd_red_blue(plane: const Plane*, table: const LabTable*, rgb: noalias u16*, lab: noalias i32*, bx: usize, by: usize, tw: usize, th: usize):
     let w = plane.width
-    let p = plane.data
-    let m = table.to_xyz
+    let stride = tw * 3
+    let m0 = table.to_xyz[0]
+    let m1 = table.to_xyz[1]
+    let m2 = table.to_xyz[2]
+    let m3 = table.to_xyz[3]
+    let m4 = table.to_xyz[4]
+    let m5 = table.to_xyz[5]
+    let m6 = table.to_xyz[6]
+    let m7 = table.to_xyz[7]
+    let m8 = table.to_xyz[8]
+    let lightness = table.lightness.data
+    let red_green = table.red_green.data
+    let blue_yellow = table.blue_yellow.data
     for ty in 1..<th - 1:
         let y = by + ty
         let first = (y & 1) * 2
         let below = ((y + 1) & 1) * 2
-        for tx in 1..<tw - 1:
-            let x = bx + tx
-            let at = ty * tw + tx
-            let o = at * 3
-            let i = y * w + x
-            let own = (usize)plane.cfa[first + (x & 1)]
-            var value: i64 = 0
-            var c = 2 - own
-            if own == 1:
-                c = (usize)plane.cfa[below + (x & 1)]
-                let g = (i64)p[i]
-                value = g + (((i64)p[i - 1] + (i64)p[i + 1] - (i64)rgb[o - 2] - (i64)rgb[o + 4]) >> 1)
-                rgb[o + 2 - c] = (u16)clip16(value)
-                value = g + (((i64)p[i - w] + (i64)p[i + w] - (i64)rgb[o - tw * 3 + 1] - (i64)rgb[o + tw * 3 + 1]) >> 1)
-            else:
-                let corners = (i64)p[i - w - 1] + (i64)p[i - w + 1] + (i64)p[i + w - 1] + (i64)p[i + w + 1]
-                let up = o - tw * 3
-                let down = o + tw * 3
-                let greens = (i64)rgb[up - 2] + (i64)rgb[up + 4] + (i64)rgb[down - 2] + (i64)rgb[down + 4]
-                value = (i64)rgb[o + 1] + ((corners - greens + 1) >> 2)
-            rgb[o + c] = (u16)clip16(value)
-            rgb[o + own] = p[i]
-            let r = (i64)rgb[o]
-            let g = (i64)rgb[o + 1]
-            let b = (i64)rgb[o + 2]
-            let fx = clip16((m[0] * r + m[1] * g + m[2] * b + 32768) >> 16)
-            let fy = clip16((m[3] * r + m[4] * g + m[5] * b + 32768) >> 16)
-            let fz = clip16((m[6] * r + m[7] * g + m[8] * b + 32768) >> 16)
-            lab[o] = table.lightness[fy]
-            lab[o + 1] = table.red_green[fx] - table.red_green[fy]
-            lab[o + 2] = table.blue_yellow[fy] - table.blue_yellow[fz]
+        let source = plane.data.data + (y * w + bx)
+        let row = rgb + ty * stride
+        let lab_row = lab + ty * stride
+        for parity: usize in 1..<3:
+            let own = (usize)plane.cfa[first + ((bx + parity) & 1)]
+            let c = (usize)plane.cfa[below + ((bx + parity) & 1)] if own == 1 else 2 - own
+            var tx = parity
+            while tx < tw - 1:
+                let s = source + tx
+                let q = row + tx *% 3
+                let sample = *s
+                if own == 1:
+                    let g = (i32)sample
+                    let across = g +% (((i32)*(s - 1) +% (i32)*(s + 1) -% (i32)*(q - 2) -% (i32)*(q + 4)) >> 1)
+                    q[2 - c] = clamp_sample(across)
+                    let down = g +% (((i32)*(s - w) +% (i32)*(s + w) -% (i32)*(q - stride + 1) -% (i32)*(q + stride + 1)) >> 1)
+                    q[c] = clamp_sample(down)
+                else:
+                    let corners = (i32)*(s - w - 1) +% (i32)*(s - w + 1) +% (i32)*(s + w - 1) +% (i32)*(s + w + 1)
+                    let up = q - stride
+                    let under = q + stride
+                    let greens = (i32)*(up - 2) +% (i32)*(up + 4) +% (i32)*(under - 2) +% (i32)*(under + 4)
+                    q[c] = clamp_sample((i32)q[1] +% ((corners -% greens +% 1) >> 2))
+                q[own] = sample
+                let r = (i64)q[0]
+                let g = (i64)q[1]
+                let b = (i64)q[2]
+                let fx = clip16((m0 *% r +% m1 *% g +% m2 *% b +% 32768) >> 16)
+                let fy = clip16((m3 *% r +% m4 *% g +% m5 *% b +% 32768) >> 16)
+                let fz = clip16((m6 *% r +% m7 *% g +% m8 *% b +% 32768) >> 16)
+                let l = lab_row + tx *% 3
+                l[0] = lightness[fy]
+                l[1] = red_green[fx] -% red_green[fy]
+                l[2] = blue_yellow[fy] -% blue_yellow[fz]
+                tx +%= 2
 
 ## For each pixel and direction, how many of its four neighbours lie within
 ## the tighter direction's lightness and chroma tolerance.
-func ahd_homogeneity(lab_h: const i32[], lab_v: const i32[], out_h: u8[], out_v: u8[], tw: usize, th: usize):
+func ahd_homogeneity(lab_h: const i32*, lab_v: const i32*, out_h: noalias u8*, out_v: noalias u8*, tw: usize, th: usize):
     let row = tw * 3
     for ty in 2..<th - 2:
         for tx in 2..<tw - 2:
-            let o = (ty * tw + tx) * 3
+            let at = ty *% tw +% tx
+            let h = lab_h + at *% 3
+            let v = lab_v + at *% 3
             # Horizontal: left, right, up, down.
-            let hl0 = difference_l(lab_h, o, o - 3)
-            let hl1 = difference_l(lab_h, o, o + 3)
-            let hl2 = difference_l(lab_h, o, o - row)
-            let hl3 = difference_l(lab_h, o, o + row)
-            let ha0 = difference_ab(lab_h, o, o - 3)
-            let ha1 = difference_ab(lab_h, o, o + 3)
-            let ha2 = difference_ab(lab_h, o, o - row)
-            let ha3 = difference_ab(lab_h, o, o + row)
-            let vl0 = difference_l(lab_v, o, o - 3)
-            let vl1 = difference_l(lab_v, o, o + 3)
-            let vl2 = difference_l(lab_v, o, o - row)
-            let vl3 = difference_l(lab_v, o, o + row)
-            let va0 = difference_ab(lab_v, o, o - 3)
-            let va1 = difference_ab(lab_v, o, o + 3)
-            let va2 = difference_ab(lab_v, o, o - row)
-            let va3 = difference_ab(lab_v, o, o + row)
+            let hl0 = difference_l(h, h - 3)
+            let hl1 = difference_l(h, h + 3)
+            let hl2 = difference_l(h, h - row)
+            let hl3 = difference_l(h, h + row)
+            let ha0 = difference_ab(h, h - 3)
+            let ha1 = difference_ab(h, h + 3)
+            let ha2 = difference_ab(h, h - row)
+            let ha3 = difference_ab(h, h + row)
+            let vl0 = difference_l(v, v - 3)
+            let vl1 = difference_l(v, v + 3)
+            let vl2 = difference_l(v, v - row)
+            let vl3 = difference_l(v, v + row)
+            let va0 = difference_ab(v, v - 3)
+            let va1 = difference_ab(v, v + 3)
+            let va2 = difference_ab(v, v - row)
+            let va3 = difference_ab(v, v + row)
             let hl = hl0 if hl0 > hl1 else hl1
             let vl = vl2 if vl2 > vl3 else vl3
             let leps = hl if hl < vl else vl
             let ha = ha0 if ha0 > ha1 else ha1
             let va = va2 if va2 > va3 else va3
             let abeps = ha if ha < va else va
-            var h: u8 = 0
-            var v: u8 = 0
-            if hl0 <= leps and ha0 <= abeps: h += 1
-            if hl1 <= leps and ha1 <= abeps: h += 1
-            if hl2 <= leps and ha2 <= abeps: h += 1
-            if hl3 <= leps and ha3 <= abeps: h += 1
-            if vl0 <= leps and va0 <= abeps: v += 1
-            if vl1 <= leps and va1 <= abeps: v += 1
-            if vl2 <= leps and va2 <= abeps: v += 1
-            if vl3 <= leps and va3 <= abeps: v += 1
-            out_h[ty * tw + tx] = h
-            out_v[ty * tw + tx] = v
+            out_h[at] = (u8)(hl0 <= leps and ha0 <= abeps) +% (u8)(hl1 <= leps and ha1 <= abeps) +% (u8)(hl2 <= leps and ha2 <= abeps) +% (u8)(hl3 <= leps and ha3 <= abeps)
+            out_v[at] = (u8)(vl0 <= leps and va0 <= abeps) +% (u8)(vl1 <= leps and va1 <= abeps) +% (u8)(vl2 <= leps and va2 <= abeps) +% (u8)(vl3 <= leps and va3 <= abeps)
 
-inline func difference_l(lab: const i32[], a: usize, b: usize) -> i64:
-    let d = (i64)lab[a] - (i64)lab[b]
-    return d if d >= 0 else -d
+inline func difference_l(a: const i32*, b: const i32*) -> i32:
+    let d = *a -% *b
+    return d if d >= 0 else -%d
 
-inline func difference_ab(lab: const i32[], a: usize, b: usize) -> i64:
-    let da = (i64)lab[a + 1] - (i64)lab[b + 1]
-    let db = (i64)lab[a + 2] - (i64)lab[b + 2]
-    return da * da + db * db
+inline func difference_ab(a: const i32*, b: const i32*) -> i64:
+    let da = (i64)a[1] -% (i64)b[1]
+    let db = (i64)a[2] -% (i64)b[2]
+    return da *% da +% db *% db
 
 ## Each pixel takes the direction more homogeneous over its 3×3 neighbourhood,
-## or the mean of both on a tie.
-func ahd_combine(horizontal: const u16[], vertical: const u16[], homogeneous_h: const u8[], homogeneous_v: const u8[], tw: usize, th: usize, out: u16[], out_stride: usize, ox: usize, oy: usize):
+## or the mean of both on a tie; `out` is the first output pixel, rows of
+## `out_stride` pixels.
+func ahd_combine(horizontal: const u16*, vertical: const u16*, homogeneous_h: const u8*, homogeneous_v: const u8*, tw: usize, th: usize, out: noalias u16*, out_stride: usize):
     for ty in 3..<th - 3:
-        let target_row = (oy + ty - 3) * out_stride + ox
+        let target_row = out + (ty - 3) * out_stride * 3
         for tx in 3..<tw - 3:
-            var h: u32 = 0
-            var v: u32 = 0
-            for yy in ty - 1..=ty + 1:
-                let at = yy * tw + tx
-                h += (u32)homogeneous_h[at - 1] + (u32)homogeneous_h[at] + (u32)homogeneous_h[at + 1]
-                v += (u32)homogeneous_v[at - 1] + (u32)homogeneous_v[at] + (u32)homogeneous_v[at + 1]
-            let o = (ty * tw + tx) * 3
-            let target = (target_row + tx - 3) * 3
+            let at = ty *% tw +% tx
+            let hu = homogeneous_h + (at - tw)
+            let hc = homogeneous_h + at
+            let hd = homogeneous_h + (at + tw)
+            let vu = homogeneous_v + (at - tw)
+            let vc = homogeneous_v + at
+            let vd = homogeneous_v + (at + tw)
+            let h = (u32)*(hu - 1) +% (u32)*hu +% (u32)*(hu + 1) +% (u32)*(hc - 1) +% (u32)*hc +% (u32)*(hc + 1) +% (u32)*(hd - 1) +% (u32)*hd +% (u32)*(hd + 1)
+            let v = (u32)*(vu - 1) +% (u32)*vu +% (u32)*(vu + 1) +% (u32)*(vc - 1) +% (u32)*vc +% (u32)*(vc + 1) +% (u32)*(vd - 1) +% (u32)*vd +% (u32)*(vd + 1)
+            let a = horizontal + at *% 3
+            let b = vertical + at *% 3
+            let target = target_row + (tx - 3) *% 3
             if h > v:
-                out[target] = horizontal[o]
-                out[target + 1] = horizontal[o + 1]
-                out[target + 2] = horizontal[o + 2]
+                target[0] = a[0]
+                target[1] = a[1]
+                target[2] = a[2]
             elif v > h:
-                out[target] = vertical[o]
-                out[target + 1] = vertical[o + 1]
-                out[target + 2] = vertical[o + 2]
+                target[0] = b[0]
+                target[1] = b[1]
+                target[2] = b[2]
             else:
-                out[target] = (u16)(((u32)horizontal[o] + (u32)vertical[o]) >> 1)
-                out[target + 1] = (u16)(((u32)horizontal[o + 1] + (u32)vertical[o + 1]) >> 1)
-                out[target + 2] = (u16)(((u32)horizontal[o + 2] + (u32)vertical[o + 2]) >> 1)
+                target[0] = (u16)(((u32)a[0] +% (u32)b[0]) >> 1)
+                target[1] = (u16)(((u32)a[1] +% (u32)b[1]) >> 1)
+                target[2] = (u16)(((u32)a[2] +% (u32)b[2]) >> 1)

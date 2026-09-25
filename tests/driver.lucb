@@ -42,6 +42,22 @@ pub func main(arguments: str[]) -> i32!:
     let command = arguments[1]
     let data = try files.read((c.str)arguments[2])
     defer free(data)
+    if command == "preview":
+        var best: u64 = 0
+        var found: raw.Preview? = none
+        for i in 0..<50:
+            let start = time.now()
+            found = try raw.preview(data)
+            let spent = time.now() - start
+            if best == 0 or spent < best:
+                best = spent
+        if let shown = found:
+            print(f"preview {shown.width}x{shown.height} orientation {shown.orientation} bytes {shown.jpeg.length} offset {(usize)shown.jpeg.data - (usize)data.data} in {best // 1000} us\n")
+            if arguments.length > 3:
+                try files.write((c.str)arguments[3], shown.jpeg)
+        else:
+            print(f"preview none in {best // 1000} us\n")
+        return 0
     if command == "recognize":
         print(f"detect {raw.detect(data)} recognize {raw.recognize(data)}\n")
         return 0
@@ -61,9 +77,10 @@ pub func main(arguments: str[]) -> i32!:
         try text_file(arguments[3], f"{found.width} {found.height} {found.channels} {found.top} {found.left} {found.active_width} {found.active_height} {found.cfa[0]} {found.cfa[1]} {found.cfa[2]} {found.cfa[3]} {found.black[0]} {found.black[1]} {found.black[2]} {found.black[3]} {found.white} {(str)pattern[0..]}\n")
         return 0
     var options = raw.Options()
-    if command == "develop" or command == "bench":
+    if command == "develop" or command == "bench" or command == "tiles":
         if arguments.length > 4:
             options.quality = raw.Quality.fast if arguments[4] == "fast" else raw.Quality.best
+            options.half = arguments[4] == "half"
         if arguments.length > 5:
             options.crop = arguments[5] == "1"
         if arguments.length > 6:
@@ -88,22 +105,53 @@ pub func main(arguments: str[]) -> i32!:
         try files.write((c.str)arguments[3], u8[]((u8*)floats.data, floats.length * 4))
         try text_file(arguments[3], f"{image.width} {image.height}\n")
         return 0
+    if command == "tiles":
+        let repeat = (usize)number(arguments[3])
+        var best: u64 = 0
+        var stages = raw.Timings()
+        for i in 0..<repeat:
+            var timings = raw.Timings()
+            options.timings = &timings
+            options.alpha = true
+            var counter = Counter()
+            let start = time.now()
+            try raw.develop(data, options, (void*)&counter, count_tile)
+            let spent = time.now() - start
+            if best == 0 or spent < best:
+                best = spent
+                stages = timings
+        let ms: u64 = 1000000
+        print(f"{best // ms} ms (parse {stages.parse // ms}, unpack {stages.unpack // ms}, levels {stages.levels // ms}, develop {stages.develop // ms} [cpu: demosaic {stages.demosaic // ms}, output {stages.output // ms}])\n")
+        return 0
     if command == "bench":
         let repeat = (usize)number(arguments[3])
         var best: u64 = 0
+        var stages = raw.Timings()
         for i in 0..<repeat:
             var image = Raster(max_bytes = 8589934592, max_pixels = 1073741824)
             defer image.close()
             with memory.heap:
                 image.encoded = try alloc u8[data.length]
             memory.copy(image.encoded, data, data.length)
+            var timings = raw.Timings()
+            options.timings = &timings
             let start = time.now()
             try raw.probe(&image, options)
             try raw.decode(&image, options)
             let spent = time.now() - start
             if best == 0 or spent < best:
                 best = spent
-        print(f"{best // 1000000} ms\n")
+                stages = timings
+        let ms: u64 = 1000000
+        print(f"{best // ms} ms (parse {stages.parse // ms}, unpack {stages.unpack // ms}, levels {stages.levels // ms}, develop {stages.develop // ms} [cpu: demosaic {stages.demosaic // ms}, output {stages.output // ms}])\n")
         return 0
     print("unknown command\n")
     return 2
+
+## A sink that counts the pixels it is handed.
+struct Counter:
+    var pixels: @usize
+
+func count_tile(context: void*?, tile: const raw.Tile*) -> !:
+    let counter = (Counter*)(context else return)
+    discard(counter.pixels.add(tile.width * tile.height))

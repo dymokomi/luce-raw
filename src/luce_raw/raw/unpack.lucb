@@ -42,7 +42,7 @@ func unpack(file: const u8[], meta: const Meta*, threads: usize) -> Mosaic!:
         .unpacked, .packed, .ljpeg, .deflate, .sony_ljpeg: try unpack_tiles(file, meta, &mosaic, threads)
         .canon: try unpack_canon(file, meta, &mosaic)
         .nikon: try unpack_nikon(file, meta, &mosaic)
-        .sony_arw2: try unpack_arw2(file, meta, &mosaic)
+        .sony_arw2: try unpack_arw2(file, meta, &mosaic, threads)
         .olympus: try unpack_olympus(file, meta, &mosaic)
         .panasonic: try unpack_panasonic(file, meta, &mosaic)
         .pentax: try unpack_pentax(file, meta, &mosaic)
@@ -52,9 +52,30 @@ func unpack(file: const u8[], meta: const Meta*, threads: usize) -> Mosaic!:
         .crx: try unpack_crx(file, meta, &mosaic, threads)
         .unknown: error(unsupported, "raw sample coding is not supported")
     if meta.curve.length == 65536:
-        for i in 0..<mosaic.data.length:
-            mosaic.data[i] = meta.curve[(usize)mosaic.data[i]]
+        var job = Rows(file = file, meta = meta, mosaic = &mosaic)
+        try parallel((mosaic.height + band_height - 1) // band_height, threads, (void*)&job, curve_band)
     return mosaic
+
+## Rows of the mosaic that one parallel item handles.
+let band_height: usize = 32
+
+## A job over bands of `band_height` mosaic rows.
+struct Rows:
+    var file: const u8[]
+    var meta: const Meta*
+    var mosaic: Mosaic*
+
+## Rows [band_height × index, …) through the file's linearization curve.
+func curve_band(context: void*, index: usize, worker: usize) -> !:
+    let job = (Rows*)context
+    let mosaic = job.mosaic
+    let curve = job.meta.curve.data
+    let row = mosaic.width * mosaic.samples
+    let start = index * band_height * row
+    let end = (usize)math.imin((i64)((index + 1) * band_height * row), (i64)mosaic.data.length)
+    let data = mosaic.data.data
+    for i in start..<end:
+        data[i] = curve[(usize)data[i]]
 
 ## What each tile of `unpack_tiles` reads and writes.
 struct Tiles:
@@ -65,7 +86,7 @@ struct Tiles:
 
 ## Decode tile `index`; tiles cover disjoint rectangles, so `parallel` may run
 ## them at once.
-func unpack_tile(context: void*, index: usize) -> !:
+func unpack_tile(context: void*, index: usize, worker: usize) -> !:
     let job = (Tiles*)context
     let meta = job.meta
     let tw = meta.tile_width

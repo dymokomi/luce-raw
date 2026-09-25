@@ -80,8 +80,9 @@ struct TiffOut:
 let flat_level: i64 = 2000
 
 ## A 24×16 flat-field DNG, orientation 6, neutral (0.5, 1, 0.8), black 64,
-## white 4095: uncompressed 16-bit, or 12-bit lossless JPEG when `jpeg`.
-func synthetic_dng(jpeg: bool) -> Buffer!:
+## white 4095: uncompressed 16-bit, or 12-bit lossless JPEG when `jpeg`. With
+## `ramp` the field is an uneven ramp instead, for following pixels around.
+func synthetic_dng(jpeg: bool, orientation: i64 = 6, ramp: bool = false) -> Buffer!:
     let width: usize = 24
     let height: usize = 16
     var samples: u16[384]
@@ -89,6 +90,8 @@ func synthetic_dng(jpeg: bool) -> Buffer!:
         for x in 0..<width:
             let color = (y & 1) + (x & 1)
             samples[y * width + x] = (u16)(64 + (flat_level // 2 if color == 0 else flat_level if color == 1 else flat_level * 4 // 5))
+            if ramp:
+                samples[y * width + x] = (u16)(64 + (x * 37 + y * y * 101 + color * 500) % 3000)
     var pixels = Buffer()
     defer pixels.close()
     if jpeg:
@@ -108,7 +111,7 @@ func synthetic_dng(jpeg: bool) -> Buffer!:
     try tiff.add(271, 2, [76, 117, 99, 101, 0])
     try tiff.add(272, 2, [84, 101, 115, 116, 0])
     try tiff.add(273, 4, [0])
-    try tiff.add(274, 3, [6])
+    try tiff.add(274, 3, [orientation])
     try tiff.add(277, 3, [1])
     try tiff.add(278, 4, [(i64)height])
     try tiff.add(279, 4, [(i64)pixels.used])
@@ -140,13 +143,69 @@ test "a flat field develops to one grey, rotated, in every mode":
         assert(about.format == "DNG" and about.width == 16 and about.height == 24 and about.matrix == "dng", "DNG facts differ")
         assert(math.abs(about.as_shot.multipliers[0] - 2.0) < 1e-9 and math.abs(about.as_shot.multipliers[2] - 1.25) < 1e-9, "as-shot multipliers differ")
         let grey = (f64)flat_level / 4031.0
-        for mode: usize in 0..<3:
-            var options = Options(threads = 2, quality = Quality.fast if mode == 1 else Quality.best, camera = mode == 2)
+        for mode: usize in 0..<4:
+            var options = Options(threads = 2, quality = Quality.fast if mode == 1 else Quality.best, camera = mode == 2, half = mode == 3)
             var image = try develop_bytes(file.view(), options)
             defer image.close()
-            assert(image.width == 16 and image.height == 24 and image.channels.length == 3 and image.channels[0].kind == .float32, "developed shape differs")
+            let scale: usize = 2 if mode == 3 else 1
+            assert(image.width * scale == 16 and image.height * scale == 24 and image.channels.length == 3 and image.channels[0].kind == .float32, "developed shape differs")
             for value in image.pixels:
                 assert(math.abs(value - grey) < 0.001, "flat field is not one grey")
+
+## A developed image assembled from `develop`'s tiles.
+struct Assembly:
+    var pixels: f32[]
+    var width: usize
+    var height: usize
+    var covered: @usize
+
+func assemble(context: void*?, tile: const Tile*) -> !:
+    let into = (Assembly*)(context else return)
+    for y in 0..<tile.height:
+        for x in 0..<tile.width:
+            for c in 0..<tile.channels:
+                into.pixels[((tile.y + y) * into.width + tile.x + x) * 4 + c] = tile.pixels[(y * tile.width + x) * tile.channels + c]
+    discard(into.covered.add(tile.width * tile.height))
+
+## `data` developed through `develop` with `options` into RGBA.
+func assembled(data: const u8[], options: Options) -> Assembly!:
+    let (w, h) = try dimensions(data, options)
+    var into = Assembly(width = w, height = h, pixels = try new f32[w * h * 4] in memory.heap)
+    try develop(data, options, (void*)&into, assemble)
+    assert(into.covered.load() == w * h, "tiles do not cover the image once")
+    return into
+
+test "every orientation, tile size and mode maps the same pixels":
+    for mode: usize in 0..<3:
+        let options = Options(threads = 3, quality = Quality.fast if mode == 1 else Quality.best, half = mode == 2, tile = 7, alpha = true)
+        var upright = try synthetic_dng(false, 1, true)
+        defer upright.close()
+        var reference = try assembled(upright.view(), options)
+        defer free(reference.pixels) in memory.heap
+        for orientation: i64 in 1..=8:
+            var file = try synthetic_dng(false, orientation, true)
+            defer file.close()
+            var turned = options
+            turned.tile = 5
+            turned.threads = 2
+            var image = try assembled(file.view(), turned)
+            defer free(image.pixels) in memory.heap
+            let sw = reference.width
+            let sh = reference.height
+            assert(image.width * image.height == sw * sh, "turned size differs")
+            for sy in 0..<sh:
+                for sx in 0..<sw:
+                    var dx = sx
+                    var dy = sy
+                    if orientation == 2 or orientation == 3:
+                        dx = sw - 1 - sx
+                    if orientation == 3 or orientation == 4:
+                        dy = sh - 1 - sy
+                    if orientation >= 5:
+                        dx = sh - 1 - sy if orientation == 6 or orientation == 7 else sy
+                        dy = sw - 1 - sx if orientation == 7 or orientation == 8 else sx
+                    for c: usize in 0..<4:
+                        assert(image.pixels[(dy * image.width + dx) * 4 + c] == reference.pixels[(sy * sw + sx) * 4 + c], "an oriented pixel moved wrongly")
 
 test "the as-shot white balance round-trips through temperature and tint":
     var file = try synthetic_dng(false)

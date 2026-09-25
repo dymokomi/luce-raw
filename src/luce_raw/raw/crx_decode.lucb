@@ -255,7 +255,7 @@ func crx_convert(image: const CrxImage*, mosaic: Mosaic*, row: usize, column: us
             mosaic.data[at + 2 * i] = (u16)(0 if value < 0 else top if value > top else value)
 
 ## Decode plane `plane` tile by tile: crxDecodePlane.
-func crx_plane(context: void*, plane: usize) -> !:
+func crx_plane(context: void*, plane: usize, worker: usize) -> !:
     let job = (CrxJob*)context
     let image = job.image
     var row: usize = 0
