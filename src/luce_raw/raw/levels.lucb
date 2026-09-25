@@ -195,6 +195,9 @@ func half_band(context: void*, index: usize, worker: usize) -> !:
         let row = plane.data[y * plane.width * 3..<(y + 1) * plane.width * 3]
         let top = &meta.pattern[((job.oy + 2 * y) % 6) * 6]
         let bottom = &meta.pattern[((job.oy + 2 * y + 1) % 6) * 6]
+        if nc == 1 and not meta.xtrans:
+            half_bayer_row(upper, lower, top, bottom, job.ox, plane.width, row.data)
+            continue
         var missing = false
         for x in 0..<plane.width:
             var rgb: u32[3]
@@ -305,6 +308,40 @@ struct LevelStage:
         release(self.vertical)
         self.tables.close()
         self = LevelStage()
+
+## One row of a half-size Bayer plane from its two leveled sensor rows: every
+## 2×2 cell has the same colors in the same places, so red and blue are read
+## where they are and the two greens averaged, as half_band's general path.
+func half_bayer_row(upper: const u16*, lower: const u16*, top: const u8*, bottom: const u8*, ox: usize, width: usize, out: noalias u16*):
+    # Where each color sits in the cell: 0 and 1 the upper row, 2 and 3 the lower.
+    var red: usize = 0
+    var blue: usize = 0
+    var green: usize = 0
+    var other: usize = 0
+    var greens: usize = 0
+    for i: usize in 0..<4:
+        let c = (top if i < 2 else bottom)[(ox + i % 2) % 6]
+        if c == 0:
+            red = i
+        elif c == 2:
+            blue = i
+        elif greens == 0:
+            green = i
+            greens = 1
+        else:
+            other = i
+    let rows: (const u16*)[2] = [upper, lower]
+    let r = rows[red >> 1] + (red & 1)
+    let b = rows[blue >> 1] + (blue & 1)
+    let g = rows[green >> 1] + (green & 1)
+    let h = rows[other >> 1] + (other & 1)
+    var q = out
+    for x in 0..<width:
+        let at = 2 *% x
+        q[0] = r[at]
+        q[1] = (u16)(((u32)g[at] +% (u32)h[at]) >> 1)
+        q[2] = b[at]
+        q = q + 3
 
 ## The balanced Plane of `mosaic`'s active area, or of its default crop: each
 ## sample less its black level, scaled so white after white balance is 65535.

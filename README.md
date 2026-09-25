@@ -182,7 +182,26 @@ oracle runs in a virtual environment under `build/venv`.
 
 ## Speed
 
-SPEED_TABLE
+Milliseconds on a 16-core Apple M4 Max (12 performance cores) shared with other
+work (load 10–17), `--release`, file already in memory, best of several runs.
+`best` and `fast` are `develop` to float32 tiles; `Raster` is `probe` and
+`decode` at `best`, which adds allocating and filling the f64 Raster:
+
+| File | 0.2.1 | best | Raster | half | fast |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Sony A7 II ARW (24 MP) | 457 | 81 | 103 | 15 | 23 |
+| Nikon D750 NEF (24 MP, lossless) | 682 | 123 | 144 | 55 | 62 |
+| Canon 6D CR2 (20 MP) | 629 | 117 | 140 | 60 | 68 |
+| Canon R5 CR3 (45 MP, C-RAW) | 1180 | 364 | 442 | 290 | 294 |
+| Pixel 4a DNG (12 MP) | 189 | 49 | 61 | 14 | 18 |
+| Adobe tiled DNG (22 MP, lossless JPEG) | 339 | 90 | 114 | 29 | 37 |
+| Fujifilm X-T2 RAF (24 MP X-Trans, compressed) | 2163 | 681 | 687 | 223 | 315 |
+
+`preview` takes 4–200 µs. Where the time goes at `best`: AHD costs about 1 s of
+CPU for 24 MP (60 ms on all cores); decoding CR2 and NEF about 50 ms; Markesteijn's
+three passes about 7 s of CPU (300–450 ms); Fujifilm's strips and CRX's planes
+decode on only eight and four threads (200 ms and 270 ms), which the pipeline
+overlaps with the demosaic. `Options.timings` reports the split for any file.
 
 ## Not supported yet
 
