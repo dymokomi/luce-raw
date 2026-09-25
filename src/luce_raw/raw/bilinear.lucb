@@ -43,9 +43,46 @@ func mosaic_pixel(plane: const Plane*, x: usize, y: usize, weighted: bool, out: 
     out[own] = plane.data[y * plane.width + x]
 
 ## The bilinear demosaic of [x0, x1) × [y0, y1) into `out`, RGB rows of
-## `stride` pixels from (`ox`, `oy`).
+## `stride` pixels from (`ox`, `oy`). A Bayer filter (greens on a diagonal)
+## takes the direct kernel inside a one-pixel border; everything else goes
+## through `mosaic_pixel`.
 func bilinear_tile(plane: const Plane*, x0: usize, y0: usize, x1: usize, y1: usize, out: u16[], stride: usize, ox: usize, oy: usize):
+    let c = plane.cfa
+    let bayer = not plane.xtrans and ((c[0] == 1 and c[3] == 1 and c[1] != 1 and c[2] != 1 and c[1] != c[2]) or (c[1] == 1 and c[2] == 1 and c[0] != 1 and c[3] != 1 and c[0] != c[3]))
     for y in y0..<y1:
-        for x in x0..<x1:
+        let inner = bayer and y >= 1 and y + 1 < plane.height
+        var x = x0
+        while x < x1:
             let at = ((oy + y - y0) * stride + ox + x - x0) * 3
+            if inner and x >= 1 and x + 1 < plane.width:
+                let end = (usize)math.imin((i64)x1, (i64)plane.width - 1)
+                bayer_row(plane, x, end, y, out.data + at)
+                x = end
+                continue
             mosaic_pixel(plane, x, y, true, out[at..<at + 3])
+            x += 1
+
+## Bilinear on Bayer pixels [x0, x1) of row `y` (inside the one-pixel border)
+## into RGB at `out`: a red or blue pixel averages its four greens and its
+## four diagonal neighbours; a green one averages each color across the row
+## and down the column. Exactly `mosaic_pixel`'s weighted sums, divided.
+func bayer_row(plane: const Plane*, x0: usize, x1: usize, y: usize, out: noalias u16*):
+    let w = plane.width
+    let row = plane.data.data + y * w
+    let first = (y & 1) * 2
+    let below = ((y + 1) & 1) * 2
+    var q = out
+    for x in x0..<x1:
+        let p = row + x
+        let own = (usize)plane.cfa[first + (x & 1)]
+        if own == 1:
+            let across = (usize)plane.cfa[first + ((x + 1) & 1)]
+            let down = (usize)plane.cfa[below + (x & 1)]
+            q[1] = *p
+            q[across] = (u16)(((u32)*(p - 1) +% (u32)*(p + 1)) >> 1)
+            q[down] = (u16)(((u32)*(p - w) +% (u32)*(p + w)) >> 1)
+        else:
+            q[own] = *p
+            q[1] = (u16)(((u32)*(p - 1) +% (u32)*(p + 1) +% (u32)*(p - w) +% (u32)*(p + w)) >> 2)
+            q[2 - own] = (u16)(((u32)*(p - w - 1) +% (u32)*(p - w + 1) +% (u32)*(p + w - 1) +% (u32)*(p + w + 1)) >> 2)
+        q = q + 3

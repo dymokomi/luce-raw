@@ -311,7 +311,8 @@ struct LevelStage:
 ## With `half`, each 2×2 cell of it becomes one RGB pixel instead, as LibRaw's
 ## half_size: red and blue as they are, the two greens of a Bayer cell averaged
 ## (the last green of an X-Trans cell), and X-Trans cells without red or blue
-## given the mean of their left and right neighbours'.
+## given the mean of their left and right neighbours'. A three-channel
+## (LinearRaw) plane averages each 2×2 block.
 func normalize(meta: const Meta*, mosaic: const Mosaic*, look: const Development*, crop: bool, half: bool, threads: usize) -> Plane!:
     var plane = Plane()
     errdefer plane.close()

@@ -1,13 +1,14 @@
 #==============================================================================================
 #
-#   raw/api - detect, probe, decode, info, white balance and sensor
+#   raw/api - detect, probe, decode, develop, info, white balance and sensor
 #
 #   DESCRIPTION:
-#       The public surface (recognize.lucb adds `recognize`). parse identifies the
-#       format and fills a Meta; probe
-#       sizes a Raster from it without reading samples; decode unpacks, levels,
-#       demosaics and writes linear sRGB. info and white_balance answer questions
-#       about the camera's white balance for an editor's open dialog.
+#       The public surface (recognize.lucb adds `recognize`, preview.lucb
+#       `preview`). parse identifies the format and fills a Meta; probe sizes a
+#       Raster from it without reading samples; develop unpacks, levels,
+#       demosaics and hands linear sRGB tiles to a sink, and decode is develop
+#       into the Raster. info and white_balance answer questions about the
+#       camera's white balance for an editor's open dialog.
 #
 #==============================================================================================
 
@@ -182,7 +183,7 @@ pub func develop(data: const u8[], options: Options, context: void*?, sink: func
         look.to_rgb = diagonal([1.0, 1.0, 1.0])
     let threads = options.threads if options.threads > 0 else (usize)os.cpus()
     let t1 = time.now()
-    if pipelines(&meta, threads):
+    if pipelines(&meta, options, threads):
         try develop_pipelined(data, &meta, &look, options, threads, context, sink, t1 - t0)
         return
     var mosaic = try unpack(data, &meta, threads)

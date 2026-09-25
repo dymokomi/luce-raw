@@ -2,12 +2,14 @@
 
 Camera RAW decoding for Luce/Base: DNG, Canon CR2 and CR3, Nikon NEF, Sony ARW, Olympus ORF,
 Panasonic RW2, Pentax PEF and Fujifilm RAF (Bayer and X-Trans, uncompressed and
-compressed) into scene-linear RGB, in pure Luce
-Base with no platform codecs. It develops the sensor data the way a raw converter's
-open does: black and white levels, white balance, highlight clipping, AHD (or
-bilinear) demosaicing — Markesteijn's for X-Trans — the camera's color matrix into linear sRGB, baseline exposure
-and orientation. The result is a luce-raster `Raster` with three float channels, R, G
-and B, where the sensor's white after white balance is 1.0.
+compressed) into scene-linear RGB, in pure Luce Base with no platform codecs. It
+develops the sensor data the way a raw converter's open does: black and white
+levels, white balance, highlight clipping, AHD (or bilinear) demosaicing —
+Markesteijn's for X-Trans — the camera's color matrix into linear sRGB, baseline
+exposure and orientation. The result is a luce-raster `Raster` with three float
+channels, R, G and B, where the sensor's white after white balance is 1.0; or the
+same pixels as float32 tiles handed to a sink while the develop runs; or, in a
+fraction of a millisecond, the largest JPEG the camera embedded.
 
 ```luce
 import raw
@@ -18,6 +20,19 @@ defer image.close()
 let options = raw.Options(quality = .best)     # or temperature = 5500.0, tint = 10.0
 try raw.probe(&image, options)                 # size, channels, "make"/"model"/"raw.matrix"
 try raw.decode(&image, options)                # image.pixels: linear sRGB, RGB interleaved
+```
+
+For an editor's canvas, `develop` delivers the image in tiles as they finish,
+from worker threads, without a Raster:
+
+```luce
+func paint(context: void*?, tile: const raw.Tile*) -> !:
+    let canvas = (Canvas*)(context else return)
+    ...                                          # tile.x, tile.y, tile.width, tile.height, tile.pixels
+
+let options = raw.Options(tile = 256, alpha = true)    # 256×256 RGBA float32 tiles
+let (width, height) = try raw.dimensions(bytes, options)
+try raw.develop(bytes, options, (void*)&canvas, paint)
 ```
 
 ## API (export `raw`, module `luce_raw.raw`)
@@ -34,6 +49,24 @@ try raw.decode(&image, options)                # image.pixels: linear sRGB, RGB 
   attributes `make`, `model` and `raw.matrix`.
 - `decode(image: Raster*, options = Options()) -> !`: develops into `image.pixels`
   (allocated when empty). Probe with the same options first.
+- `develop(data, options, context: void*?, sink: func(void*?, const Tile*) -> unit!) -> !`:
+  develops `data` into tiles of the developed image and hands each to
+  `sink(context, tile)` as soon as it is finished. Tiles are `options.tile` pixels
+  square (smaller at the right and bottom edges) on a grid from the image's
+  top-left, in developed (oriented) coordinates; `Tile` holds `x`, `y`, `width`,
+  `height`, `channels` (3, or 4 with `alpha`: alpha 1.0) and `pixels`, `width` ×
+  `height` × `channels` straight, linear float32 values, rows packed, valid during
+  the call only. The sink runs on worker threads, several at once and in no
+  particular order (roughly top to bottom of the sensor); an error it returns stops
+  the develop and is returned. Every pixel is delivered exactly once.
+- `dimensions(data, options = Options()) -> (usize, usize)`: the width and height
+  `develop` and `decode` produce with these options (crop, half size, orientation).
+- `preview(data) -> Preview?`: the largest embedded JPEG — TIFF directories and
+  SubIFDs (JPEG interchange and JPEG strips), Olympus' camera settings, Panasonic's
+  JpgFromRaw, CR3's JPEG track, the RAF header — as `jpeg` (a view of `data`),
+  its own `width` and `height` (before orientation), and the raw's `orientation`
+  (1–8), or none when the file carries no JPEG. Nothing is decoded: well under a
+  millisecond.
 - `info(data) -> Info`: format, camera, sensor and developed sizes, bit depth, the
   as-shot `WhiteBalance`, baseline exposure, orientation, and where the color matrix
   came from (`matrix`: "dng", "table" or "generic").
@@ -47,10 +80,17 @@ try raw.decode(&image, options)                # image.pixels: linear sRGB, RGB 
   `xtrans` flag), black and white levels.
 
 `Options`: `quality` (`.best` AHD, or Markesteijn's three-pass X-Trans demosaic;
-`.fast` bilinear), `temperature` and `tint` (zero
-temperature keeps the as-shot balance), `exposure` (apply the baseline exposure,
-default on), `crop` (the camera's default crop, default on), `camera` (skip the color
-matrix: white-balanced camera RGB, for profiling), `threads` (zero: one per processor).
+`.fast` bilinear), `temperature` and `tint` (zero temperature keeps the as-shot
+balance), `exposure` (apply the baseline exposure, default on), `crop` (the
+camera's default crop, default on), `camera` (skip the color matrix: white-balanced
+camera RGB, for profiling), `half` (half size without demosaicing: each 2×2 filter
+cell becomes one pixel, as LibRaw's `half_size` — the two greens of a Bayer cell
+averaged; X-Trans cells as LibRaw lays them, green-only cells taking red and blue
+from their neighbours; LinearRaw DNGs, which LibRaw leaves at full size, average
+each 2×2 block), `threads` (zero: one per processor), `tile` and `alpha`
+(`develop`'s tile side, default 256, and RGBA instead of RGB), and `timings`
+(a `Timings*` that receives the time spent parsing, unpacking, leveling and
+developing, and the demosaic and output time summed over the workers).
 
 ## Formats
 
@@ -77,18 +117,29 @@ attribute are "generic".
 ## Pipeline
 
 1. **Unpack** the sensor samples into a 16-bit mosaic and apply the file's
-   linearization curve (tiles decode in parallel).
+   linearization curve. Tiles, ARW2 rows, Fujifilm strips and CRX planes decode in
+   parallel. The single entropy-coded streams of CR2 (lossless JPEG) and NEF decode
+   in parallel too (`serial.lucb`): their Huffman codes resynchronise, so chunks
+   decode speculatively, find where their neighbour's true symbols begin, and then
+   decode their own share of differences into place.
 2. **Levels**: subtract black, scale by white − black and by the white balance
    multiplier of each pixel's color (the smallest multiplier is 1), clip to [0, 1],
-   as 16-bit values — dcraw's and LibRaw's `scale_colors`.
+   as 16-bit values — dcraw's and LibRaw's `scale_colors`, through lookup tables
+   where the black pattern allows.
 3. **Demosaic** in tiles on all processors: AHD (dcraw/LibRaw's integer
    implementation, homogeneity in CIELAB) inside a five-pixel border that is filled by
    neighbour averages; for X-Trans, Markesteijn's three-pass algorithm as LibRaw's
-   `xtrans_interpolate(3)` inside an eight-pixel border; or bilinear, which also
-   handles X-Trans.
+   `xtrans_interpolate(3)` inside an eight-pixel border; or bilinear. The kernels
+   are branch-free where the choice is data (which neighbours are homogeneous,
+   which direction wins).
 4. **Color**: the balanced camera values to linear sRGB (DNG: the DNG SDK's model;
-   tables: dcraw's `cam_xyz_coeff`), times 2^BaselineExposure, negative values clipped,
-   written through the orientation.
+   tables: dcraw's `cam_xyz_coeff`) with 2^BaselineExposure folded into the matrix,
+   negative values clipped, turned by the orientation into float32 tiles.
+
+Tiles are cut in developed coordinates, so each output tile maps to one rectangle
+of the sensor. For compressed RAF and CR3 at `best`, the stages overlap
+(`pipeline.lucb`): levels, X-Trans green ranges and tiles start on the rows the
+decoder has finished while it is still working further down the sensor.
 
 ## Accuracy against LibRaw
 
@@ -107,6 +158,10 @@ auto-brightness, no crop):
   while this package follows the DNG specification (interpolated matrices and
   ForwardMatrix), which is the point of difference (measured 0.0024–0.0045; with
   LibRaw's model the difference falls to 0.00003).
+- `fast` against LibRaw's bilinear (`LINEAR`) and `half` against its `half_size`,
+  both in camera space with the camera-space limits (measured 0.00000–0.00010).
+- `preview` must answer LibRaw's thumbnail (LibRaw may insert an EXIF segment after
+  its start marker) or a larger JPEG, and none only when LibRaw has none.
 
 ## Tests
 
@@ -127,14 +182,7 @@ oracle runs in a virtual environment under `build/venv`.
 
 ## Speed
 
-Developing a 24 MP raw on a 16-core Apple M-series machine (`--release`, probe and
-decode, file already in memory): 0.32–0.44 s for tiled DNG and for lossless,
-uncompressed and ARW2 Sony files; 0.6–0.7 s for NEF, CR2 and single-strip DNG, whose
-one entropy-coded stream decodes on a single thread. CR3 decodes its four planes in
-parallel: about 0.8 s for 24 MP, 1.2 s for the R5's 45 MP. Compressed RAF decodes its
-strips in parallel; X-Trans at `best` takes about 2.1 s for 24 MP (Markesteijn's
-three passes in eight directions), 0.45 s at `fast`. Bilinear (`fast`) saves
-0.15–0.2 s on Bayer files. Tiled decoding, levels and demosaicing use every processor.
+SPEED_TABLE
 
 ## Not supported yet
 
@@ -142,4 +190,4 @@ Canon CRW, sRAW/mRAW and CR3's CRX encoding 3; Nikon HE/HE*; 14-bit Olympus/OM O
 raw formats 5–8 (GH5S, S1, GH6 and later); Fujifilm SuperCCD (rotated) RAF; Sony
 ARW1 and Sony's newer lossy codings; floating-point and lossy-JPEG DNGs, DNG opcode
 lists (the lens-shading GainMaps phone DNGs rely on), DefaultScale, and filter
-patterns other than 2×2 RGB; embedded previews.
+patterns other than 2×2 RGB.

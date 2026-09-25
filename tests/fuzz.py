@@ -3,8 +3,9 @@
 
 Each round truncates a sample or overwrites bytes in its first 256 KiB (where the
 headers, directories and maker notes live) or in its sensor data, then runs the
-driver's `sensor` (parse and unpack) and `develop` (the whole pipeline, fast
-mode) on it. An error exit is fine; a trap or a signal is a failure.
+driver's `sensor` (parse and unpack), `develop` (the whole pipeline, in fast
+and half mode) and `preview` on it. An error exit is fine; a trap or a signal
+is a failure.
 Usage: fuzz.py [ROUNDS_PER_SAMPLE] [SEED] [SAMPLE...]
 """
 import json, random, subprocess, sys, tempfile
@@ -15,7 +16,7 @@ DRIVER = ROOT / "build/driver"
 
 
 def run(path, out):
-    for command in (["sensor", path, out], ["develop", path, out, "fast", "1", "1"]):
+    for command in (["sensor", path, out], ["develop", path, out, "fast", "1", "1"], ["develop", path, out, "half", "1", "1"], ["preview", path]):
         done = subprocess.run([DRIVER, *command], capture_output=True, text=True, timeout=300)
         if "trap" in done.stderr or done.returncode < 0 or done.returncode > 2:
             return f"{command[0]}: exit {done.returncode}: {done.stderr.strip()[:300]}"

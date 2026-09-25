@@ -163,12 +163,13 @@ func run_item(run: Pipeline*, index: usize, worker: usize) -> !:
     try develop_item((void*)run.tiles, tile, worker)
 
 
-## Whether `meta`'s raw can develop through the pipeline: a coding that
-## reports rows, no masked black to measure, no curve to apply first, and a
-## sensor large enough for the X-Trans walk's plan.
-func pipelines(meta: const Meta*, threads: usize) -> bool:
+## Whether `meta`'s raw develops through the pipeline: a demosaic heavy
+## enough to overlap (`best`, full size), a coding that reports rows, no
+## masked black to measure, no curve to apply first, and a sensor large
+## enough for the X-Trans walk's plan.
+func pipelines(meta: const Meta*, options: Options, threads: usize) -> bool:
     let coded = meta.coding == .fuji or meta.coding == .crx
-    return coded and threads >= 4 and meta.curve.length == 0 and meta.width >= 128 and meta.height >= 128 and not (meta.mask[2] > meta.mask[0] and meta.mask[3] > meta.mask[1])
+    return coded and options.quality == .best and not options.half and threads >= 4 and meta.curve.length == 0 and meta.width >= 128 and meta.height >= 128 and not (meta.mask[2] > meta.mask[0] and meta.mask[3] > meta.mask[1])
 
 ## Develop `file` through the pipeline into tiles for `sink` (see `develop`),
 ## filling `timings` when given.

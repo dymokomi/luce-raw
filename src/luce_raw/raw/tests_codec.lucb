@@ -170,3 +170,32 @@ test "the JPEG bit reader drops stuffed zeros and stops at markers":
         failed = true
         recover 0)
     assert(failed, "the reader read through a marker")
+
+test "a lossless JPEG scan decodes alike on many threads and serially":
+    let width: usize = 700
+    let height: usize = 800
+    let predictors: u32[2] = [1, 6]
+    for predictor in predictors:
+        # Two components wandering independently, with the odd large step.
+        let samples = try new u16[width * height * 2] in memory.heap
+        defer free(samples) in memory.heap
+        var seed: u32 = 99 +% predictor
+        var level: i32[2] = [2000, 3000]
+        for i in 0..<samples.length:
+            seed = seed *% 1103515245 +% 12345
+            let step = (i32)(seed >> 26) - 32 if (seed & 0xff) != 7 else (i32)(seed >> 20) - 2048
+            level[i % 2] = (level[i % 2] + step) & 16383
+            samples[i] = (u16)level[i % 2]
+        var stream = try encode_ljpeg(samples, width, height, 2, 14, predictor, 0)
+        defer stream.close()
+        var parallel_jpeg = try LosslessJpeg.open(stream.view())
+        defer parallel_jpeg.close()
+        let decoded = try decode_jpeg_parallel(&parallel_jpeg, stream.view(), 8)
+        defer release_samples(decoded)
+        assert(decoded.length == samples.length, "the scan was not decoded in parallel")
+        var serial = try LosslessJpeg.open(stream.view())
+        defer serial.close()
+        for y in 0..<height:
+            let line = try serial.next()
+            for i in 0..<line.length:
+                assert(line[i] == decoded[y * width * 2 + i] and line[i] == samples[y * width * 2 + i], "a sample differs")

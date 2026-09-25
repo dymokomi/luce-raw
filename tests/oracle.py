@@ -104,6 +104,11 @@ def check_develop(sample, out, matrix, space, mode="best"):
                                output_bps=16, highlight_mode=rawpy.HighlightMode.Clip,
                                adjust_maximum_thr=0.0, user_sat=None, bright=1.0)
     theirs = theirs.astype(np.float32) / 65535.0
+    if mode == "half" and theirs.shape[0] > 1.5 * h:
+        # LibRaw's half_size leaves images without a color filter (LinearRaw)
+        # at full size; ours averages each 2×2 block, so compare with that.
+        hh, ww = theirs.shape[0] // 2 * 2, theirs.shape[1] // 2 * 2
+        theirs = theirs[:hh, :ww].reshape(hh // 2, 2, ww // 2, 2, 3).mean(axis=(1, 3))
     if abs(theirs.shape[0] - h) > 1024 or abs(theirs.shape[1] - w) > 1024:
         return False, f"developed {w}x{h} vs LibRaw {theirs.shape[1]}x{theirs.shape[0]}"
     dy, dx = best_alignment(ours, theirs)

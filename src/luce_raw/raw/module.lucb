@@ -47,12 +47,14 @@
 #==============================================================================================
 
 ## Camera RAW decoding: DNG (uncompressed, lossless JPEG, Deflate; Bayer and
-## LinearRaw), Canon CR2 and CR3, Nikon NEF, Sony ARW, Olympus ORF, Panasonic RW2,
-## Pentax PEF and Fujifilm RAF (Bayer and X-Trans, uncompressed and compressed). `probe` and `decode` fill a luce-raster
-## `Raster` with three float channels, R, G and B, in linear sRGB where the
-## sensor's white level after white balance is 1.0 (times the file's baseline
-## exposure). `info` and `white_balance` answer the as-shot white balance and
-## the multipliers for any temperature and tint.
+## LinearRaw), Canon CR2 and CR3, Nikon NEF, Sony ARW, Olympus ORF, Panasonic
+## RW2, Pentax PEF and Fujifilm RAF (Bayer and X-Trans, uncompressed and
+## compressed). `probe` and `decode` fill a luce-raster `Raster` with three
+## float channels, R, G and B, in linear sRGB where the sensor's white level
+## after white balance is 1.0 (times the file's baseline exposure); `develop`
+## hands the same pixels to a sink as float32 tiles while it works, and
+## `preview` finds the largest embedded JPEG. `info` and `white_balance` answer
+## the as-shot white balance and the multipliers for any temperature and tint.
 import memory
 import math
 import thread
