@@ -1,0 +1,172 @@
+#==============================================================================================
+#
+#   raw/tests_codec - Bit reader, Huffman and lossless JPEG tests
+#
+#   DESCRIPTION:
+#       A minimal lossless JPEG encoder (every difference category coded in five
+#       bits, any predictor, optional restart intervals) produces streams that the
+#       decoder must reproduce sample for sample; truncated streams must fail with
+#       errors. The Huffman and bit reader tests use hand-built codes.
+#
+#==============================================================================================
+
+## Most-significant-first bit writer with JPEG's zero byte after 0xFF.
+struct BitWriter:
+    var out: Buffer
+    var value: u32
+    var count: u32
+
+    mutating func put(bits: u32, length: u32) -> !:
+        for i in 0..<length:
+            self.value = (self.value << 1) | ((bits >> (length - 1 - i)) & 1)
+            self.count += 1
+            if self.count == 8:
+                try self.out.byte((u8)self.value)
+                if self.value == 255:
+                    try self.out.byte(0)
+                self.value = 0
+                self.count = 0
+
+    mutating func flush() -> !:
+        while self.count != 0:
+            try self.put(1, 1)
+
+## Encode `samples` (`width` × `height` pixels of `components` interleaved) as a
+## lossless JPEG with `predictor`, a restart every `restart` pixels (0: none).
+func encode_ljpeg(samples: const u16[], width: usize, height: usize, components: usize, precision: u32, predictor: u32, restart: usize) -> Buffer!:
+    var writer = BitWriter(out = Buffer())
+    errdefer writer.out.close()
+    try writer.out.put([0xff, 0xd8, 0xff, 0xc3, 0, (u8)(8 + 3 * components), (u8)precision, (u8)(height >> 8), (u8)height, (u8)(width >> 8), (u8)width, (u8)components])
+    for c in 0..<components:
+        try writer.out.put([(u8)(c + 1), 0x11, 0])
+    if restart > 0:
+        try writer.out.put([0xff, 0xdd, 0, 4, (u8)(restart >> 8), (u8)restart])
+    # One table: categories 0 to 16, five bits each.
+    try writer.out.put([0xff, 0xc4, 0, 36, 0x00, 0, 0, 0, 0, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    for symbol: u8 in 0..<17:
+        try writer.out.byte(symbol)
+    try writer.out.put([0xff, 0xda, 0, (u8)(6 + 2 * components), (u8)components])
+    for c in 0..<components:
+        try writer.out.put([(u8)(c + 1), 0x00])
+    try writer.out.put([(u8)predictor, 0, 0])
+    var marker: u8 = 0
+    for y in 0..<height:
+        let first = y == 0 or (restart > 0 and (y * width) % restart == 0)
+        if restart > 0 and y > 0 and (y * width) % restart == 0:
+            try writer.flush()
+            try writer.out.put([0xff, 0xd0 + marker])
+            marker = (marker + 1) % 8
+        for x in 0..<width:
+            for c in 0..<components:
+                let at = (y * width + x) * components + c
+                let a = (i32)samples[at - components] if x > 0 else 0
+                let b = (i32)samples[at - width * components] if y > 0 else 0
+                let d = (i32)samples[at - width * components - components] if x > 0 and y > 0 else 0
+                var prediction = (i32)1 << (precision - 1)
+                if x > 0 and first:
+                    prediction = a
+                elif x == 0 and not first:
+                    prediction = b
+                elif x > 0:
+                    prediction = a if predictor == 1 else b if predictor == 2 else d if predictor == 3 else a + b - d if predictor == 4 else a + ((b - d) >> 1) if predictor == 5 else b + ((a - d) >> 1) if predictor == 6 else (a + b) >> 1
+                var delta = ((i32)samples[at] - prediction) & 65535
+                if delta >= 32768:
+                    delta -= 65536
+                var category: u32 = 0
+                var magnitude = delta if delta >= 0 else -delta
+                while magnitude > 0:
+                    category += 1
+                    magnitude >>= 1
+                try writer.put(category, 5)
+                if category > 0 and category < 16:
+                    try writer.put((u32)(delta if delta > 0 else delta + ((i32)1 << category) - 1), category)
+    try writer.flush()
+    try writer.out.put([0xff, 0xd9])
+    return writer.out
+
+## Decode every line of `data` into `out`.
+func decode_ljpeg(data: const u8[], out: u16[]) -> !:
+    var jpeg = try LosslessJpeg.open(data)
+    defer jpeg.close()
+    let line = jpeg.width * jpeg.components
+    for y in 0..<jpeg.height:
+        let samples = try jpeg.next()
+        memory.copy(out[y * line..], samples, line)
+
+test "lossless JPEG round-trips every predictor, component count and restart interval":
+    let width: usize = 13
+    let height: usize = 7
+    let samples = try new u16[width * height * 4] in memory.heap
+    defer free(samples) in memory.heap
+    let decoded = try new u16[width * height * 4] in memory.heap
+    defer free(decoded) in memory.heap
+    let restarts: usize[2] = [0, width * 2]
+    for components: usize in 1..=4:
+        for i in 0..<width * height * components:
+            samples[i] = (u16)(testing.random() % 4096)
+        for predictor: u32 in 1..=7:
+            for restart in restarts:
+                var stream = try encode_ljpeg(samples[..<width * height * components], width, height, components, 12, predictor, restart)
+                defer stream.close()
+                try decode_ljpeg(stream.view(), decoded)
+                for i in 0..<width * height * components:
+                    assert(decoded[i] == samples[i], "lossless JPEG sample differs")
+
+test "16-bit lossless JPEG codes the ±32768 difference as category 16":
+    var samples: u16[8] = [0, 32768, 0, 65535, 1, 65534, 32767, 32768]
+    var stream = try encode_ljpeg(samples, 8, 1, 1, 16, 1, 0)
+    defer stream.close()
+    var decoded: u16[8]
+    try decode_ljpeg(stream.view(), decoded)
+    for i: usize in 0..<8:
+        assert(decoded[i] == samples[i], "16-bit sample differs")
+
+test "a truncated or corrupted lossless JPEG fails with an error":
+    var samples: u16[120]
+    for i in 0..<samples.length:
+        samples[i] = (u16)(testing.random() % 16384)
+    var stream = try encode_ljpeg(samples, 12, 10, 1, 14, 6, 24)
+    defer stream.close()
+    var decoded: u16[120]
+    let data = stream.view()
+    for cut in 0..<data.length - 2:
+        var failed = false
+        decode_ljpeg(data[..<cut], decoded) catch failure:
+            failed = true
+            recover ()
+        assert(failed, "a truncated lossless JPEG decoded")
+    let copy = try new u8[data.length] in memory.heap
+    defer free(copy) in memory.heap
+    for round in 0..<400:
+        memory.copy(copy, data, data.length)
+        copy[(usize)(testing.random() % (u64)data.length)] = (u8)(testing.random() % 256)
+        decode_ljpeg(copy, decoded) catch failure:
+            recover ()
+
+test "Huffman tables decode dcraw's example code":
+    let counts: u8[16] = [0, 1, 4, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let symbols: u8[13] = [0x04, 0x03, 0x05, 0x06, 0x02, 0x07, 0x01, 0x08, 0x09, 0x00, 0x0a, 0x0b, 0xff]
+    var table = try Huffman.build(counts, symbols)
+    defer table.close()
+    # 00 010 011 100 101 1100 1101 11100 11101 11110 111110 1111110 1111111: 57
+    # bits, then seven 1s, which read as one more 0xff.
+    let stream: u8[8] = [0x13, 0x97, 0x37, 0x9d, 0xf7, 0xdf, 0xbf, 0xff]
+    var reader = Bits(data = stream)
+    for expected in symbols:
+        assert(try table.decode(&reader) == (u32)expected, "Huffman symbol differs")
+    assert(try table.decode(&reader) == 0xff, "the final padding code differs")
+    var failed = false
+    discard(table.decode(&reader) catch failure:
+        failed = true
+        recover 0)
+    assert(failed, "reading past the data succeeded")
+
+test "the JPEG bit reader drops stuffed zeros and stops at markers":
+    let stream: u8[6] = [0xff, 0x00, 0x81, 0xff, 0xd9, 0x55]
+    var reader = Bits(data = stream, stuffed = true)
+    assert(try reader.read(8) == 0xff and try reader.read(8) == 0x81, "stuffed byte mishandled")
+    var failed = false
+    discard(reader.read(1) catch failure:
+        failed = true
+        recover 0)
+    assert(failed, "the reader read through a marker")

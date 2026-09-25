@@ -114,22 +114,28 @@ struct LosslessJpeg:
             first = true
         let nc = self.components
         let base: i32 = (i32)1 << (self.precision - 1)
+        # The reader and tables live in locals for the line: the hot loop then
+        # touches no field of `self`.
+        var reader = self.reader
+        var tables: (const Huffman*)[4] = [&self.tables[self.selectors[0]], &self.tables[self.selectors[1 if nc > 1 else 0]], &self.tables[self.selectors[2 if nc > 2 else 0]], &self.tables[self.selectors[3 if nc > 3 else 0]]]
         for c in 0..<nc:
-            let delta = try difference(&self.reader, &self.tables[self.selectors[c]])
+            let delta = try difference(&reader, tables[c])
             let prediction = base if first else (i32)above[c]
             current[c] = (u16)((prediction + delta) & 65535)
-        for x in 1..<self.width:
-            let at = x * nc
-            for c in 0..<nc:
-                let delta = try difference(&self.reader, &self.tables[self.selectors[c]])
-                let a = (i32)current[at + c - nc]
-                var prediction = a
-                if not first:
-                    let b = (i32)above[at + c]
-                    let d = (i32)above[at + c - nc]
-                    let p = self.predictor
-                    prediction = a if p == 1 else b if p == 2 else d if p == 3 else a + b - d if p == 4 else a + ((b - d) >> 1) if p == 5 else b + ((a - d) >> 1) if p == 6 else (a + b) >> 1
-                current[at + c] = (u16)((prediction + delta) & 65535)
+        let p = self.predictor
+        if first or p == 1:
+            for at in nc..<samples:
+                let delta = try difference(&reader, tables[at % nc])
+                current[at] = (u16)(((i32)current[at - nc] + delta) & 65535)
+        else:
+            for at in nc..<samples:
+                let delta = try difference(&reader, tables[at % nc])
+                let a = (i32)current[at - nc]
+                let b = (i32)above[at]
+                let d = (i32)above[at - nc]
+                let prediction = b if p == 2 else d if p == 3 else a + b - d if p == 4 else a + ((b - d) >> 1) if p == 5 else b + ((a - d) >> 1) if p == 6 else (a + b) >> 1
+                current[at] = (u16)((prediction + delta) & 65535)
+        self.reader = reader
         self.line += 1
         return current
 

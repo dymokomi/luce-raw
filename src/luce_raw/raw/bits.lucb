@@ -138,7 +138,7 @@ struct Huffman:
 
 ## The next Huffman-coded JPEG difference: a magnitude category from `table`,
 ## then that many bits of value, read with one buffer refill.
-func difference(reader: Bits*, table: const Huffman*) -> i32!:
+inline func difference(reader: Bits*, table: const Huffman*) -> i32!:
     if reader.count < 32:
         reader.fill()
     let entry = table.table[(usize)(reader.buffer >> (64 - table.bits))]

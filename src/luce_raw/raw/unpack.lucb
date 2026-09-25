@@ -39,7 +39,7 @@ func unpack(file: const u8[], meta: const Meta*, threads: usize) -> Mosaic!:
     var mosaic = try Mosaic.create(meta.raw_width, meta.raw_height, meta.samples)
     errdefer mosaic.close()
     match meta.coding:
-        .unpacked, .packed, .ljpeg, .deflate: try unpack_tiles(file, meta, &mosaic, threads)
+        .unpacked, .packed, .ljpeg, .deflate, .sony_ljpeg: try unpack_tiles(file, meta, &mosaic, threads)
         .canon: try unpack_canon(file, meta, &mosaic)
         .nikon: try unpack_nikon(file, meta, &mosaic)
         .sony_arw2: try unpack_arw2(file, meta, &mosaic)
@@ -72,6 +72,7 @@ func unpack_tile(context: void*, index: usize) -> !:
     let data = try binary.slice(job.file, try meta.offsets.uint(index), try meta.counts.uint(index))
     match meta.coding:
         .ljpeg: try unpack_ljpeg_tile(data, job.mosaic, x, y, tw)
+        .sony_ljpeg: try unpack_sony_ljpeg_tile(data, job.mosaic, x, y)
         .deflate: try unpack_deflate_tile(data, meta, job.mosaic, x, y, tw, th)
         _: try unpack_plain_tile(data, meta, job.mosaic, x, y, tw, th)
 

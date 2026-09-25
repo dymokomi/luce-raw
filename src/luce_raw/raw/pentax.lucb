@@ -32,9 +32,9 @@ func parse_pef(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
     meta.model = table_model(meta.make, meta.model)
     let main = try tree.at(0)
     meta.orientation = try main.uint(274, 1)
-    meta.raw_width = (usize)(try main.uint(256))
-    meta.raw_height = (usize)(try main.uint(257))
-    meta.bits = (usize)(try main.uint(258, 12))
+    meta.raw_width = try dimension(try main.uint(256))
+    meta.raw_height = try dimension(try main.uint(257))
+    meta.bits = try depth(try main.uint(258, 12))
     meta.little = main.little
     let compression = try main.uint(259, 1)
     let offsets = try main.find(273) else error(corrupt, "PEF raw has no strips")
@@ -84,17 +84,17 @@ func parse_pef(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
 ## maker note, predicted from two columns left (two rows up in the first two).
 func unpack_pentax(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
     var header = Reader(data = meta.extra, little = (meta.flags & 1) != 0)
-    let depth = (usize)((try header.uint(2) + 12) & 15)
+    let used = (usize)((try header.uint(2) + 12) & 15)
     discard(try header.take(12))
     var codes: u16[16]
     var lengths: u8[16]
-    for c in 0..<depth:
+    for c in 0..<used:
         codes[c] = (u16)(try header.uint(2))
-    for c in 0..<depth:
+    for c in 0..<used:
         lengths[c] = try header.byte()
     let entries = try new u16[4096] in memory.heap
     defer free(entries) in memory.heap
-    for c in 0..<depth:
+    for c in 0..<used:
         let length = (usize)lengths[c]
         if length == 0 or length > 12:
             error(corrupt, "invalid PEF code table")

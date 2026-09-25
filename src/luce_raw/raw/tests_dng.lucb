@@ -1,0 +1,212 @@
+#==============================================================================================
+#
+#   raw/tests_dng - Synthetic DNG tests: decoding, white balance, corruption
+#
+#   DESCRIPTION:
+#       A small TIFF writer builds DNGs in memory: a flat grey field seen through
+#       an RGGB filter under a known neutral, uncompressed or lossless JPEG. Every
+#       developed pixel must then be the same grey, whatever the demosaic, and the
+#       as-shot white balance must round-trip through temperature and tint.
+#       Truncated and byte-corrupted copies must fail with errors, never traps.
+#
+#==============================================================================================
+
+## One TIFF entry being written: its type, count and little-endian value bytes.
+struct TagOut:
+    var tag: u16
+    var kind: u16
+    var count: u32
+    var bytes: u8[80]
+    var size: usize
+
+## A little-endian TIFF with one directory, written after its entries are added.
+struct TiffOut:
+    var tags: TagOut[40]
+    var count: usize
+
+    ## Add `tag` with `values` of `kind` (BYTE 1, ASCII 2, SHORT 3, LONG 4,
+    ## RATIONAL 5 or SRATIONAL 10, whose values are numerator, denominator pairs).
+    mutating func add(tag: u16, kind: u16, values: const i64[]) -> !:
+        var out = TagOut(tag = tag, kind = kind)
+        let width: usize = 1 if kind == 1 or kind == 2 else 2 if kind == 3 else 4
+        for value in values:
+            for b in 0..<width:
+                out.bytes[out.size] = (u8)(value >> (8 * (i64)b))
+                out.size += 1
+        out.count = (u32)(values.length // 2 if kind == 5 or kind == 10 else values.length)
+        self.tags[self.count] = out
+        self.count += 1
+
+    ## The file: header, directory, entry values, then `pixels`, which the
+    ## StripOffsets entry (273) is pointed at.
+    func write(pixels: const u8[]) -> Buffer!:
+        var out = Buffer()
+        errdefer out.close()
+        try out.text("II")
+        try out.uint(42, 2)
+        try out.uint(8, 4)
+        let values_at = 8 + 2 + self.count * 12 + 4
+        var extra: usize = 0
+        for i in 0..<self.count:
+            if self.tags[i].size > 4:
+                extra += (self.tags[i].size + 1) & ~(usize)1
+        let pixels_at = values_at + extra
+        try out.uint((u64)self.count, 2)
+        var next = values_at
+        for i in 0..<self.count:
+            let t = self.tags[i]
+            try out.uint((u64)t.tag, 2)
+            try out.uint((u64)t.kind, 2)
+            try out.uint((u64)t.count, 4)
+            if t.tag == 273:
+                try out.uint((u64)pixels_at, 4)
+            elif t.size <= 4:
+                try out.put(t.bytes[..<t.size])
+                for _ in t.size..<4:
+                    try out.byte(0)
+            else:
+                try out.uint((u64)next, 4)
+                next += (t.size + 1) & ~(usize)1
+        try out.uint(0, 4)
+        for i in 0..<self.count:
+            let t = self.tags[i]
+            if t.size > 4:
+                try out.put(t.bytes[..<t.size])
+                if t.size % 2 == 1:
+                    try out.byte(0)
+        try out.put(pixels)
+        return out
+
+let flat_level: i64 = 2000
+
+## A 24×16 flat-field DNG, orientation 6, neutral (0.5, 1, 0.8), black 64,
+## white 4095: uncompressed 16-bit, or 12-bit lossless JPEG when `jpeg`.
+func synthetic_dng(jpeg: bool) -> Buffer!:
+    let width: usize = 24
+    let height: usize = 16
+    var samples: u16[384]
+    for y in 0..<height:
+        for x in 0..<width:
+            let color = (y & 1) + (x & 1)
+            samples[y * width + x] = (u16)(64 + (flat_level // 2 if color == 0 else flat_level if color == 1 else flat_level * 4 // 5))
+    var pixels = Buffer()
+    defer pixels.close()
+    if jpeg:
+        var stream = try encode_ljpeg(samples, width, height, 1, 12, 1, 0)
+        defer stream.close()
+        try pixels.put(stream.view())
+    else:
+        for value in samples:
+            try pixels.uint((u64)value, 2)
+    var tiff = TiffOut()
+    try tiff.add(254, 4, [0])
+    try tiff.add(256, 4, [(i64)width])
+    try tiff.add(257, 4, [(i64)height])
+    try tiff.add(258, 3, [12 if jpeg else 16])
+    try tiff.add(259, 3, [7 if jpeg else 1])
+    try tiff.add(262, 3, [32803])
+    try tiff.add(271, 2, [76, 117, 99, 101, 0])
+    try tiff.add(272, 2, [84, 101, 115, 116, 0])
+    try tiff.add(273, 4, [0])
+    try tiff.add(274, 3, [6])
+    try tiff.add(277, 3, [1])
+    try tiff.add(278, 4, [(i64)height])
+    try tiff.add(279, 4, [(i64)pixels.used])
+    try tiff.add(33421, 3, [2, 2])
+    try tiff.add(33422, 1, [0, 1, 1, 2])
+    try tiff.add(50706, 1, [1, 4, 0, 0])
+    try tiff.add(50714, 3, [64])
+    try tiff.add(50717, 3, [4095])
+    try tiff.add(50721, 10, [7000, 10000, -1000, 10000, -1000, 10000, -4000, 10000, 12000, 10000, 2000, 10000, -1000, 10000, 2000, 10000, 6000, 10000])
+    try tiff.add(50728, 5, [1, 2, 1, 1, 4, 5])
+    try tiff.add(50778, 3, [21])
+    return try tiff.write(pixels.view())
+
+## Probe and decode `data` with `options` into a fresh Raster.
+func develop_bytes(data: const u8[], options: Options) -> Raster!:
+    var image = Raster()
+    errdefer image.close()
+    image.encoded = try alloc u8[data.length] in memory.heap
+    memory.copy(image.encoded, data, data.length)
+    try probe(&image, options)
+    try decode(&image, options)
+    return image
+
+test "a flat field develops to one grey, rotated, in every mode":
+    for jpeg in [false, true]:
+        var file = try synthetic_dng(jpeg)
+        defer file.close()
+        let about = try info(file.view())
+        assert(about.format == "DNG" and about.width == 16 and about.height == 24 and about.matrix == "dng", "DNG facts differ")
+        assert(math.abs(about.as_shot.multipliers[0] - 2.0) < 1e-9 and math.abs(about.as_shot.multipliers[2] - 1.25) < 1e-9, "as-shot multipliers differ")
+        let grey = (f64)flat_level / 4031.0
+        for mode: usize in 0..<3:
+            var options = Options(threads = 2, quality = Quality.fast if mode == 1 else Quality.best, camera = mode == 2)
+            var image = try develop_bytes(file.view(), options)
+            defer image.close()
+            assert(image.width == 16 and image.height == 24 and image.channels.length == 3 and image.channels[0].kind == .float32, "developed shape differs")
+            for value in image.pixels:
+                assert(math.abs(value - grey) < 0.001, "flat field is not one grey")
+
+test "the as-shot white balance round-trips through temperature and tint":
+    var file = try synthetic_dng(false)
+    defer file.close()
+    let shot = (try info(file.view())).as_shot
+    assert(shot.temperature > 2000.0 and shot.temperature < 12000.0, "as-shot temperature is implausible")
+    let again = try white_balance(file.view(), shot.temperature, shot.tint)
+    for c: usize in 0..<3:
+        assert(math.abs(again.multipliers[c] / shot.multipliers[c] - 1.0) < 0.002, "temperature and tint do not reproduce the as-shot balance")
+    let warmer = try white_balance(file.view(), shot.temperature * 0.7, shot.tint)
+    assert(warmer.multipliers[2] > again.multipliers[2] * 1.05, "a warmer light does not raise blue's multiplier")
+    var failed = false
+    discard(white_balance(file.view(), 100.0, 0.0) catch failure:
+        failed = true
+        recover shot)
+    assert(failed, "an impossible temperature was accepted")
+
+test "Robertson temperature and tint invert each other; D65 is about 6500 K":
+    for kelvin in [2500.0, 3200.0, 5003.0, 6504.0, 9000.0]:
+        for tint in [-40.0, 0.0, 25.0]:
+            let (t, g) = temperature_of(white_of(kelvin, tint))
+            assert(math.abs(t / kelvin - 1.0) < 0.002 and math.abs(g - tint) < 0.1, "temperature and tint do not round-trip")
+    let (d65, _tint) = temperature_of(d65_xy)
+    assert(d65 > 6400.0 and d65 < 6600.0, "D65 is not about 6500 K")
+    let white = apply(try srgb_from_d50(), xy_to_xyz(d50_xy))
+    assert(math.abs(white[0] - 1.0) + math.abs(white[1] - 1.0) + math.abs(white[2] - 1.0) < 1e-9, "D50 is not sRGB white")
+
+test "truncated and corrupted DNGs fail with errors, never traps":
+    for jpeg in [false, true]:
+        var file = try synthetic_dng(jpeg)
+        defer file.close()
+        let data = file.view()
+        let options = Options(threads = 1)
+        var cut: usize = 0
+        while cut < data.length:
+            var failed = false
+            var image = develop_bytes(data[..<cut], options) catch failure:
+                failed = true
+                recover Raster()
+            image.close()
+            assert(failed, "a truncated DNG developed")
+            cut += 3
+        let copy = try new u8[data.length] in memory.heap
+        defer free(copy) in memory.heap
+        for round in 0..<300:
+            memory.copy(copy, data, data.length)
+            for _ in 0..<1 + testing.random() % 3:
+                copy[(usize)(testing.random() % (u64)data.length)] = (u8)(testing.random() % 256)
+            var image = develop_bytes(copy, options) catch failure:
+                recover Raster()
+            image.close()
+
+test "detect accepts raws and refuses other files":
+    var file = try synthetic_dng(false)
+    defer file.close()
+    assert(detect(file.view()), "a DNG was not detected")
+    assert(not detect(b"\x89PNG\r\n\x1a\n0000000000000000"), "a PNG was taken for a raw")
+    var tiff = TiffOut()
+    try tiff.add(256, 4, [2])
+    try tiff.add(257, 4, [2])
+    var plain = try tiff.write(b"")
+    defer plain.close()
+    assert(not detect(plain.view()), "a plain TIFF was taken for a raw")

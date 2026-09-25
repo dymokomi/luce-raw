@@ -28,3 +28,5 @@ bilinear.lucb
 ahd.lucb
 develop.lucb
 api.lucb
+tests_codec.lucb
+tests_dng.lucb

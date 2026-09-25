@@ -106,5 +106,11 @@
   "url": "https://raw.pixls.us/getfile.php/4176/nice/Google%20-%20Pixel%204a%20-%2016bit%20(4:3).dng",
   "sha256": "11b38186ee3455376291bcdb3049728a3f9dcd94b9e82ff76855d9f3430e44be",
   "camera": "Google Pixel 4a"
+ },
+ {
+  "name": "sony_a1m2_lossless.arw",
+  "url": "https://raw.pixls.us/getfile.php/7833/nice/Sony%20-%20ILCE-1M2%20-%2014bit%20lossless%20(3:2).ARW",
+  "sha256": "3f4ce83f58b1809b9f0d70489091b44e9597a57ec80470bade3fcf53640c6469",
+  "camera": "Sony ILCE-1M2"
  }
 ]

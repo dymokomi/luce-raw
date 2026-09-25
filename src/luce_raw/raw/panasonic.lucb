@@ -18,8 +18,8 @@ func parse_rw2(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
     if try main.find(0x118) == none:
         error(unsupported, "only RW2 Panasonic raws are supported")
     meta.orientation = try main.uint(274, 1)
-    meta.raw_width = (usize)(try main.uint(0x02))
-    meta.raw_height = (usize)(try main.uint(0x03))
+    meta.raw_width = try dimension(try main.uint(0x02))
+    meta.raw_height = try dimension(try main.uint(0x03))
     let top = (usize)(try main.uint(0x04))
     let left = (usize)(try main.uint(0x05))
     let bottom = (usize)(try main.uint(0x06))
@@ -29,7 +29,7 @@ func parse_rw2(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
         meta.left = left
         meta.width = right - left
         meta.height = bottom - top
-    meta.bits = (usize)(try main.uint(0x0a, 12))
+    meta.bits = try depth(try main.uint(0x0a, 12))
     let encoding = try main.uint(0x2d, 4)
     if encoding != 4 or meta.bits != 12:
         error(unsupported, "this RW2 raw format is not supported")

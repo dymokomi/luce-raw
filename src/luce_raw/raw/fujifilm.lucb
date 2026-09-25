@@ -57,9 +57,9 @@ func parse_raf(file: const u8[], meta: Meta*) -> !:
     let root = try tree.at(0)
     let pointer = try root.find(0xf000) else error(unsupported, "RAF raw block has no 0xf000 directory")
     let raw = try root.child(try pointer.uint(0))
-    meta.raw_width = (usize)(try raw.uint(0xf001))
-    meta.raw_height = (usize)(try raw.uint(0xf002))
-    meta.bits = (usize)(try raw.uint(0xf003, 12))
+    meta.raw_width = try dimension(try raw.uint(0xf001))
+    meta.raw_height = try dimension(try raw.uint(0xf002))
+    meta.bits = try depth(try raw.uint(0xf003, 12))
     meta.data_offset = (usize)(try raw.locate(try raw.uint(0xf007)))
     meta.data_size = (usize)(try raw.uint(0xf008))
     if meta.bits != 12 or meta.data_size * 8 != meta.raw_width * meta.raw_height * 12:

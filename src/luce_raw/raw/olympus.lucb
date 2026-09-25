@@ -17,8 +17,8 @@ func parse_orf(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
     meta.format = "ORF"
     let main = try tree.at(0)
     meta.orientation = try main.uint(274, 1)
-    meta.raw_width = (usize)(try main.uint(256))
-    meta.raw_height = (usize)(try main.uint(257))
+    meta.raw_width = try dimension(try main.uint(256))
+    meta.raw_height = try dimension(try main.uint(257))
     meta.little = main.little
     let offsets = try main.find(273) else error(corrupt, "ORF raw has no strips")
     let counts = try main.find(279) else error(corrupt, "ORF strips lack byte counts")
@@ -89,6 +89,10 @@ func unpack_olympus(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
     if meta.data_size < 8:
         error(corrupt, "ORF raw data is truncated")
     var reader = Bits(data = try binary.slice(file, (u64)meta.data_offset + 7, (u64)meta.data_size - 7))
+    # The highest set bit of each twelve-bit window.
+    var highest: u8[4096]
+    for v in 2..<highest.length:
+        highest[v] = highest[v >> 1] + 1
     let w = mosaic.width
     let p = mosaic.data
     for y in 0..<mosaic.height:
@@ -99,23 +103,32 @@ func unpack_olympus(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
             var bits: i32 = 2 + i
             while (((carries[c] & 0xffff) >> (bits + i)) != 0) and bits < 16:
                 bits += 1
-            let head = (i32)(try reader.read(3))
+            # At most 3 + 12 + 16 + 16 bits: one refill covers the pixel.
+            if reader.count < 48:
+                reader.fill()
+            let head = (i32)(reader.buffer >> 61)
             let low = head & 3
             let sign: i32 = -1 if (head & 4) != 0 else 0
-            # The high part: leading zeros of the next twelve bits, or an escape.
-            if reader.count < 32:
-                reader.fill()
-            var high = (i32)12
-            let window = reader.peek(12)
+            let window = (usize)((reader.buffer << 3) >> 52)
+            var used: u32 = 3
+            var high: i32 = 0
             if window != 0:
-                high = 11 - (i32)leading(window)
-                try reader.skip((u32)high + 1)
+                high = 11 - (i32)highest[window]
+                used += (u32)high + 1
             else:
-                try reader.skip(12)
-                high = (i32)(try reader.read((u32)(16 - bits))) >> 1
-            carries[c] = (high << bits) | (i32)(try reader.read((u32)bits))
-            let delta = (carries[c] ^ sign) + carries[c + 1]
-            carries[c + 1] = (delta * 3 + carries[c + 1]) >> 5
+                used += 12
+                let escape = (u32)(16 - bits)
+                high = (i32)((reader.buffer << used) >> (64 - escape)) >> 1 if escape > 0 else 0
+                used += escape
+            let value = (i32)((reader.buffer << used) >> (64 - (u32)bits))
+            used += (u32)bits
+            reader.buffer = reader.buffer << used
+            reader.count -= used
+            if reader.count < reader.padding:
+                error(corrupt, "ORF raw data is truncated")
+            carries[c] = (high << bits) | value
+            let delta = (carries[c] ^ sign) +% carries[c + 1]
+            carries[c + 1] = (delta *% 3 +% carries[c + 1]) >> 5
             carries[c + 2] = 0 if carries[c] > 16 else carries[c + 2] + 1
             var prediction: i32 = 0
             if y < 2 and x < 2:
@@ -134,13 +147,4 @@ func unpack_olympus(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
                     prediction = west + north - corner if dw > 32 or dn > 32 else (west + north) >> 1
                 else:
                     prediction = west if dw > dn else north
-            p[y * w + x] = (u16)((prediction + ((delta << 2) | low)) & 0xffff)
-
-## The index of the highest set bit of a nonzero value.
-func leading(value: u32) -> u32:
-    var n: u32 = 0
-    var v = value
-    while v > 1:
-        v >>= 1
-        n += 1
-    return n
+            p[y * w + x] = (u16)((prediction +% ((delta << 2) | low)) & 0xffff)

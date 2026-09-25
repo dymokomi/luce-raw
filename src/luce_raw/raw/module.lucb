@@ -25,8 +25,9 @@
 #       bilinear.lucb  the fast demosaic
 #       ahd.lucb       adaptive homogeneity-directed demosaic
 #       develop.lucb   tiles through demosaic, matrix and orientation into the Raster
-#       api.lucb       detect, probe, decode, info and white balance
-#       tests.lucb     unit tests on synthetic streams and truncation fuzzing
+#       api.lucb       detect, probe, decode, info, white balance and sensor
+#       tests_codec.lucb  bit reader, Huffman and lossless JPEG tests
+#       tests_dng.lucb    synthetic DNG decoding, white balance and fuzzing tests
 #
 #==============================================================================================
 
@@ -43,7 +44,8 @@ import thread
 import os
 import binary
 import compress
-from binary import Reader
+import testing
+from binary import Reader, Buffer
 from raster import Raster, SampleType
 from raster_errors import corrupt, unsupported, invalid, limit
 

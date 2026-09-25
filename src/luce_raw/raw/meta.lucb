@@ -21,6 +21,7 @@ enum Coding:
     canon
     nikon
     sony_arw2
+    sony_ljpeg
     olympus
     panasonic
     pentax
@@ -157,6 +158,14 @@ struct Meta:
         var empty: u16[]
         self.curve = empty
 
-## The EXIF orientation for a maker's rotation in degrees clockwise.
-func orientation_for(degrees: i64) -> u64:
-    return 6 if degrees == 90 else 3 if degrees == 180 else 8 if degrees == 270 else 1
+## A sensor dimension read from a file, refused unless it is plausible.
+func dimension(value: u64) -> usize!:
+    if value == 0 or value > 100000:
+        error(corrupt, "raw sensor dimension is invalid")
+    return (usize)value
+
+## A sample bit depth read from a file, refused outside one to sixteen bits.
+func depth(value: u64) -> usize!:
+    if value == 0 or value > 16:
+        error(unsupported, "raw sample depth must be one to sixteen bits")
+    return (usize)value

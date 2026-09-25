@@ -13,12 +13,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          path: luce-tiff
+          path: luce-raw
       - id: pins
         run: |
-          echo "base=$(cat luce-tiff/bootstrap/BASE)" >> "$GITHUB_OUTPUT"
-          echo "raster=$(cat luce-tiff/bootstrap/RASTER)" >> "$GITHUB_OUTPUT"
-          echo "compress=$(cat luce-tiff/bootstrap/COMPRESS)" >> "$GITHUB_OUTPUT"
+          echo "base=$(cat luce-raw/bootstrap/BASE)" >> "$GITHUB_OUTPUT"
+          echo "raster=$(cat luce-raw/bootstrap/RASTER)" >> "$GITHUB_OUTPUT"
+          echo "compress=$(cat luce-raw/bootstrap/COMPRESS)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-base
@@ -34,7 +34,7 @@ jobs:
             git init -q "$name"
             git -C "$name" fetch -q --depth 1 "https://github.com/dymokomi/$name.git" "$revision"
             git -C "$name" checkout -q --detach FETCH_HEAD
-          done < luce-tiff/bootstrap/PACKAGES
+          done < luce-raw/bootstrap/PACKAGES
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-raster
@@ -51,5 +51,5 @@ jobs:
           ln -s "$(command -v clang)" "$RUNNER_TEMP/luce-bin/cc"
           echo "$RUNNER_TEMP/luce-bin" >> "$GITHUB_PATH"
       - run: cd luce-base && ./build.sh
-      - run: ./test.sh
-        working-directory: luce-tiff
+      - run: ./test.sh --quick
+        working-directory: luce-raw

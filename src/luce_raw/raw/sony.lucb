@@ -4,7 +4,8 @@
 #
 #   DESCRIPTION:
 #       An ARW is a TIFF with the raw in a SubIFD: 16-bit words when uncompressed,
-#       or ARW2 blocks when "compressed": sixteen same-color pixels in sixteen bytes,
+#       lossless JPEG tiles (four components, one 2×2 block per sample) when
+#       lossless, or ARW2 blocks when "compressed": sixteen same-color pixels in sixteen bytes,
 #       an 11-bit maximum and minimum with their positions and 7-bit steps above the
 #       minimum, then Sony's tone curve (tag 0x7010) expands the 11 bits to 14. The
 #       white balance and black level sit in the SR2 sub-IFD, encrypted with a key
@@ -18,30 +19,37 @@ func parse_arw(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
     let main = try tree.at(0)
     meta.orientation = try main.uint(274, 1)
     let raw = try dng_raw(tree)
-    meta.raw_width = (usize)(try raw.uint(256))
-    meta.raw_height = (usize)(try raw.uint(257))
-    let bits = (usize)(try raw.uint(258, 12))
+    meta.raw_width = try dimension(try raw.uint(256))
+    meta.raw_height = try dimension(try raw.uint(257))
+    let bits = try depth(try raw.uint(258, 12))
     meta.bits = bits
     meta.little = raw.little
     let compression = try raw.uint(259, 1)
-    let offsets = try raw.find(273) else error(corrupt, "ARW raw has no strips")
-    let counts = try raw.find(279) else error(corrupt, "ARW strips lack byte counts")
-    meta.data_offset = (usize)(try offsets.uint(0))
-    meta.data_size = (usize)(try counts.uint(0))
     let pixels = meta.raw_width * meta.raw_height
-    if compression == 32767 and meta.data_size == pixels:
-        meta.coding = .sony_arw2
-        meta.bits = 14
-        try sony_curve(meta, &raw)
-    elif (compression == 1 or compression == 32767) and meta.data_size == pixels * 2:
-        meta.coding = .unpacked
-        meta.offsets = offsets
-        meta.counts = counts
-        meta.tile_width = meta.raw_width
-        meta.tile_height = meta.raw_height
-        meta.bits = 16
+    if compression == 7:
+        meta.coding = .sony_ljpeg
+        meta.offsets = try raw.find(324) else error(corrupt, "lossless ARW has no tiles")
+        meta.counts = try raw.find(325) else error(corrupt, "lossless ARW tiles lack byte counts")
+        meta.tile_width = (usize)(try raw.uint(322))
+        meta.tile_height = (usize)(try raw.uint(323))
     else:
-        error(unsupported, "this ARW compression is not supported")
+        let offsets = try raw.find(273) else error(corrupt, "ARW raw has no strips")
+        let counts = try raw.find(279) else error(corrupt, "ARW strips lack byte counts")
+        meta.data_offset = (usize)(try offsets.uint(0))
+        meta.data_size = (usize)(try counts.uint(0))
+        if compression == 32767 and meta.data_size == pixels:
+            meta.coding = .sony_arw2
+            meta.bits = 14
+            try sony_curve(meta, &raw)
+        elif (compression == 1 or compression == 32767) and meta.data_size == pixels * 2:
+            meta.coding = .unpacked
+            meta.offsets = offsets
+            meta.counts = counts
+            meta.tile_width = meta.raw_width
+            meta.tile_height = meta.raw_height
+            meta.bits = 16
+        else:
+            error(unsupported, "this ARW compression is not supported")
     meta.white = [(f64)(((u64)1 << (u64)(14 if meta.coding == .sony_arw2 else bits)) - 1), 0.0, 0.0]
     try cfa_from(&raw, meta)
     if let origin = try raw.find(50719):
@@ -126,6 +134,28 @@ func sony_balance(meta: Meta*, r: f64, g: f64, b: f64) -> !:
         meta.neutral = [g / r, 1.0, g / b]
         meta.neutral_known = true
 
+## A lossless ARW tile: a four-component lossless JPEG whose every sample is
+## a 2×2 block of the mosaic.
+func unpack_sony_ljpeg_tile(data: const u8[], mosaic: Mosaic*, x0: usize, y0: usize) -> !:
+    var jpeg = try LosslessJpeg.open(data)
+    defer jpeg.close()
+    if jpeg.components != 4:
+        error(corrupt, "lossless ARW tile must have four components")
+    let w = mosaic.width
+    for row in 0..<jpeg.height:
+        let y = y0 + row * 2
+        if y + 1 >= mosaic.height:
+            break
+        let line = try jpeg.next()
+        for column in 0..<jpeg.width:
+            let x = x0 + column * 2
+            if x + 1 >= w:
+                break
+            mosaic.data[y * w + x] = line[column * 4]
+            mosaic.data[y * w + x + 1] = line[column * 4 + 1]
+            mosaic.data[(y + 1) * w + x] = line[column * 4 + 2]
+            mosaic.data[(y + 1) * w + x + 1] = line[column * 4 + 3]
+
 ## ARW2: rows of 16-byte blocks, each sixteen pixels of one color two apart.
 ## Samples are stored as tone curve indexes; unpack applies the curve.
 func unpack_arw2(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
@@ -153,7 +183,10 @@ func unpack_arw2(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
                 elif i == low_at:
                     pixels[i] = (u16)low
                 else:
-                    let pair = (u32)block[bit >> 3] | ((u32)(block[(bit >> 3) + 1] if (bit >> 3) + 1 < 16 else 0) << 8)
+                    # A corrupt block naming one position for both extremes has a
+                    # fifteenth step, past its sixteen bytes: it reads as zeros.
+                    let at_byte = bit >> 3
+                    let pair = ((u32)block[at_byte] if at_byte < 16 else 0) | ((u32)(block[at_byte + 1] if at_byte + 1 < 16 else 0) << 8)
                     let value = (((pair >> (u32)(bit & 7)) & 0x7f) << shift) + low
                     pixels[i] = (u16)(value if value < 0x7ff else 0x7ff)
                     bit += 7

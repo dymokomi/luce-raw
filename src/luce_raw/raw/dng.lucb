@@ -114,14 +114,14 @@ func parse_dng(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
     meta.orientation = try main.uint(274, 1)
     try dng_color(meta, &main)
     let raw = try dng_raw(tree)
-    meta.raw_width = (usize)(try raw.uint(256))
-    meta.raw_height = (usize)(try raw.uint(257))
+    meta.raw_width = try dimension(try raw.uint(256))
+    meta.raw_height = try dimension(try raw.uint(257))
     meta.samples = (usize)(try raw.uint(277, 1))
-    meta.bits = (usize)(try raw.uint(258, 16))
+    meta.bits = try depth(try raw.uint(258, 16))
     meta.little = raw.little
     meta.predictor = try raw.uint(317, 1)
     meta.mosaic = try raw.uint(262) == 32803
-    if meta.bits < 1 or meta.bits > 16 or try raw.uint(339, 1) != 1:
+    if try raw.uint(339, 1) != 1:
         error(unsupported, "floating-point and wider than 16-bit DNGs are not supported")
     let compression = try raw.uint(259, 1)
     meta.coding = Coding.unpacked if compression == 1 and (meta.bits == 8 or meta.bits == 16) else Coding.packed if compression == 1 else Coding.ljpeg if compression == 7 else Coding.deflate if compression == 8 else error(unsupported, "lossy or unknown DNG compression is not supported")
