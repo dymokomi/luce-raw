@@ -1,0 +1,122 @@
+#==============================================================================================
+#
+#   raw/pentax - Pentax and Ricoh PEF
+#
+#   DESCRIPTION:
+#       A PEF is a TIFF with the raw in IFD0: uncompressed, or Huffman-coded JPEG-style
+#       differences from the pixel two columns left (compression 65535), with the
+#       code table in the maker note (tag 0x220). The maker note ("AOC\0" then a byte
+#       order) counts its offsets from the file and holds the black levels (0x200)
+#       and white balance (0x201) in R, G, G, B order.
+#
+#==============================================================================================
+
+## Pentax sensors with masked columns: model prefix, raw width at least, left
+## margin and width kept, after LibRaw.
+struct PentaxCrop:
+    var model: str
+    var raw_width: u16
+    var left: u16
+    var width: u16
+
+let pentax_crops: PentaxCrop[5] = [
+    PentaxCrop(model = "K-5", raw_width = 4960, left = 10, width = 4950),
+    PentaxCrop(model = "K-r", raw_width = 4352, left = 0, width = 4309),
+    PentaxCrop(model = "K-x", raw_width = 4352, left = 0, width = 4309),
+    PentaxCrop(model = "K-3 II", raw_width = 6080, left = 4, width = 6040),
+    PentaxCrop(model = "K-7", raw_width = 4736, left = 0, width = 4684)]
+
+## Fill `meta` from a Pentax PEF.
+func parse_pef(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
+    meta.format = "PEF"
+    meta.model = table_model(meta.make, meta.model)
+    let main = try tree.at(0)
+    meta.orientation = try main.uint(274, 1)
+    meta.raw_width = (usize)(try main.uint(256))
+    meta.raw_height = (usize)(try main.uint(257))
+    meta.bits = (usize)(try main.uint(258, 12))
+    meta.little = main.little
+    let compression = try main.uint(259, 1)
+    let offsets = try main.find(273) else error(corrupt, "PEF raw has no strips")
+    let counts = try main.find(279) else error(corrupt, "PEF strips lack byte counts")
+    meta.data_offset = (usize)(try offsets.uint(0))
+    meta.data_size = (usize)(try counts.uint(0))
+    if compression == 65535:
+        meta.coding = .pentax
+    elif compression == 1:
+        meta.offsets = offsets
+        meta.counts = counts
+        meta.tile_width = meta.raw_width
+        meta.tile_height = (usize)(try main.uint(278, (u64)meta.raw_height))
+        meta.coding = .unpacked if meta.bits == 16 else .packed
+    else:
+        error(unsupported, "this PEF compression is not supported")
+    for crop in pentax_crops:
+        if starts(meta.model, crop.model) and meta.raw_width >= (usize)crop.raw_width:
+            meta.left = (usize)crop.left
+            meta.width = (usize)crop.width
+            meta.height = meta.raw_height
+    let exif = tree.exif else error(corrupt, "PEF has no EXIF directory")
+    meta.cfa = [0, 1, 1, 2]
+    try exif_cfa(&exif, meta)
+    let note = try exif.find(37500) else error(corrupt, "PEF has no maker note")
+    if note.data.length < 10 or (str)note.data[..<4] != "AOC\0":
+        error(unsupported, "PEF maker note has an unknown layout")
+    let little = note.data[4] == 'I'
+    let maker = try Directory.open(file, 0, note.position + 6, little)
+    if let black = try maker.find(0x200):
+        if black.count == 4:
+            try canonical_black(meta, &black)
+    if let balance = try maker.find(0x201):
+        if balance.count == 4:
+            let r = try balance.real(0)
+            let g = (try balance.real(1) + try balance.real(2)) * 0.5
+            let b = try balance.real(3)
+            if r > 0.0 and g > 0.0 and b > 0.0:
+                meta.neutral = [g / r, 1.0, g / b]
+                meta.neutral_known = true
+    if meta.coding == .pentax:
+        let table = try maker.find(0x220) else error(corrupt, "compressed PEF lacks its code table")
+        meta.extra = table.data
+        meta.flags = 1 if little else 0
+
+## dcraw's pentax_load_raw: JPEG-style differences with a code table from the
+## maker note, predicted from two columns left (two rows up in the first two).
+func unpack_pentax(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
+    var header = Reader(data = meta.extra, little = (meta.flags & 1) != 0)
+    let depth = (usize)((try header.uint(2) + 12) & 15)
+    discard(try header.take(12))
+    var codes: u16[16]
+    var lengths: u8[16]
+    for c in 0..<depth:
+        codes[c] = (u16)(try header.uint(2))
+    for c in 0..<depth:
+        lengths[c] = try header.byte()
+    let entries = try new u16[4096] in memory.heap
+    defer free(entries) in memory.heap
+    for c in 0..<depth:
+        let length = (usize)lengths[c]
+        if length == 0 or length > 12:
+            error(corrupt, "invalid PEF code table")
+        let first = (usize)codes[c]
+        let span = (usize)4096 >> length
+        if first + span > 4096:
+            error(corrupt, "invalid PEF code table")
+        for k in 0..<span:
+            entries[first + k] = (u16)((length << 8) | c)
+    var table = try Huffman.custom(12, entries)
+    defer table.close()
+    var reader = Bits(data = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size))
+    var vertical: u16[4]
+    let w = mosaic.width
+    for y in 0..<mosaic.height:
+        var horizontal: u16[2]
+        for x in 0..<w:
+            let delta = (u16)(try difference(&reader, &table))
+            if x < 2:
+                let v = (y & 1) * 2 + x
+                vertical[v] = vertical[v] +% delta
+                horizontal[x] = vertical[v]
+            else:
+                horizontal[x & 1] = horizontal[x & 1] +% delta
+            mosaic.data[y * w + x] = horizontal[x & 1]

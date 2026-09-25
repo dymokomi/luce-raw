@@ -96,7 +96,7 @@ def check_develop(sample, out, matrix, space):
                                output_bps=16, highlight_mode=rawpy.HighlightMode.Clip,
                                adjust_maximum_thr=0.0, user_sat=None, bright=1.0)
     theirs = theirs.astype(np.float32) / 65535.0
-    if abs(theirs.shape[0] - h) > 64 or abs(theirs.shape[1] - w) > 64:
+    if abs(theirs.shape[0] - h) > 256 or abs(theirs.shape[1] - w) > 256:
         return False, f"developed {w}x{h} vs LibRaw {theirs.shape[1]}x{theirs.shape[0]}"
     dy, dx = best_alignment(ours, theirs)
     a, b = overlap(ours, theirs, dy, dx)

@@ -1,0 +1,95 @@
+#==============================================================================================
+#
+#   raw/fujifilm - Fujifilm RAF (Bayer sensors)
+#
+#   DESCRIPTION:
+#       A RAF starts "FUJIFILM" and a big-endian header of offsets: an embedded JPEG
+#       whose EXIF names the camera and orientation, a directory of Fujifilm records
+#       (sizes, crop, layout; 0x131 marks an X-Trans sensor, which is not
+#       supported), and the raw block: a small TIFF whose 0xf000 directory gives the
+#       sensor size, bits, black levels, as-shot white balance and the samples.
+#       Uncompressed 12-bit samples come two per three bytes, little-endian.
+#
+#==============================================================================================
+
+## Fill `meta` from a Fujifilm RAF.
+func parse_raf(file: const u8[], meta: Meta*) -> !:
+    meta.format = "RAF"
+    meta.make = "FUJIFILM"
+    var header = Reader(data = file, position = 84, little = false)
+    let jpeg = (usize)(try header.uint(4))
+    discard(try header.uint(4))
+    let records = (usize)(try header.uint(4))
+    discard(try header.uint(4))
+    let block = (usize)(try header.uint(4))
+    var name = Reader(data = file, position = 28)
+    meta.model = try name.cstring(32)
+    # The embedded JPEG's EXIF: orientation, and the model's full name.
+    if jpeg > 0 and jpeg + 12 < file.length:
+        let exif = Tree.walk(file, jpeg + 12, jpeg + 12) catch failure:
+            recover Tree()
+        if exif.count > 0:
+            let first = try exif.at(0)
+            meta.orientation = try first.uint(274, 1)
+    # Fujifilm's records: crop, and the layout flags of rotated sensors.
+    var list = Reader(data = file, position = records, little = false)
+    let entries = (usize)(try list.uint(4))
+    if entries > 255:
+        error(corrupt, "RAF record directory is too long")
+    for i in 0..<entries:
+        let tag = try list.uint(2)
+        let length = (usize)(try list.uint(2))
+        var value = Reader(data = try list.take(length), little = false)
+        if tag == 0x131:
+            error(unsupported, "X-Trans RAF files are not supported")
+        if tag == 0x130 and length >= 2:
+            discard(try value.byte())
+            if (try value.byte() & 8) == 0:
+                error(unsupported, "rotated (SuperCCD) RAF files are not supported")
+        if tag == 0x110 and length >= 4:
+            meta.crop_y = (usize)(try value.uint(2))
+            meta.crop_x = (usize)(try value.uint(2))
+        if tag == 0x111 and length >= 4:
+            meta.crop_height = (usize)(try value.uint(2))
+            meta.crop_width = (usize)(try value.uint(2))
+    # The raw block's TIFF and its 0xf000 directory.
+    let tree = try Tree.walk(file, block, block)
+    let root = try tree.at(0)
+    let pointer = try root.find(0xf000) else error(unsupported, "RAF raw block has no 0xf000 directory")
+    let raw = try root.child(try pointer.uint(0))
+    meta.raw_width = (usize)(try raw.uint(0xf001))
+    meta.raw_height = (usize)(try raw.uint(0xf002))
+    meta.bits = (usize)(try raw.uint(0xf003, 12))
+    meta.data_offset = (usize)(try raw.locate(try raw.uint(0xf007)))
+    meta.data_size = (usize)(try raw.uint(0xf008))
+    if meta.bits != 12 or meta.data_size * 8 != meta.raw_width * meta.raw_height * 12:
+        error(unsupported, "only uncompressed 12-bit RAF files are supported")
+    meta.coding = .packed_little
+    meta.cfa = [0, 1, 1, 2]
+    if let black = try raw.find(0xf00a):
+        if black.count >= 4:
+            meta.black_rows = 2
+            meta.black_columns = 2
+            for p: usize in 0..<4:
+                meta.black[p] = try black.real(p)
+    if let balance = try raw.find(0xf00e):
+        if balance.count == 3:
+            let g = try balance.real(0)
+            let r = try balance.real(1)
+            let b = try balance.real(2)
+            if r > 0.0 and g > 0.0 and b > 0.0:
+                meta.neutral = [g / r, 1.0, g / b]
+                meta.neutral_known = true
+
+## Twelve-bit samples two per three bytes: the little-endian 24-bit word's low
+## half is the first pixel, its high half the second.
+func unpack_packed_little(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
+    let data = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size)
+    let w = mosaic.width
+    let row_bytes = w * 3 // 2
+    for y in 0..<mosaic.height:
+        let row = data[y * row_bytes..<(y + 1) * row_bytes]
+        for k in 0..<w // 2:
+            let word = (u32)row[k * 3] | ((u32)row[k * 3 + 1] << 8) | ((u32)row[k * 3 + 2] << 16)
+            mosaic.data[y * w + k * 2] = (u16)(word & 0xfff)
+            mosaic.data[y * w + k * 2 + 1] = (u16)(word >> 12)

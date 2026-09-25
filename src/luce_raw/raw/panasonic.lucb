@@ -1,0 +1,120 @@
+#==============================================================================================
+#
+#   raw/panasonic - Panasonic and Leica RW2
+#
+#   DESCRIPTION:
+#       An RW2 is a TIFF (magic "U") whose IFD0 carries Panasonic's own tags: sensor
+#       size and borders, bits, the filter pattern, black and white levels and the
+#       white balance, and the raw's offset (0x118). The classic coding (raw format
+#       4) packs fourteen pixels in sixteen bytes, read backwards through 16 KiB
+#       blocks that are stored rotated by 0x2008 bytes (dcraw's pana_bits).
+#
+#==============================================================================================
+
+## Fill `meta` from a Panasonic RW2.
+func parse_rw2(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
+    meta.format = "RW2"
+    let main = try tree.at(0)
+    if try main.find(0x118) == none:
+        error(unsupported, "only RW2 Panasonic raws are supported")
+    meta.orientation = try main.uint(274, 1)
+    meta.raw_width = (usize)(try main.uint(0x02))
+    meta.raw_height = (usize)(try main.uint(0x03))
+    let top = (usize)(try main.uint(0x04))
+    let left = (usize)(try main.uint(0x05))
+    let bottom = (usize)(try main.uint(0x06))
+    let right = (usize)(try main.uint(0x07))
+    if right > left and bottom > top and right <= meta.raw_width and bottom <= meta.raw_height:
+        meta.top = top
+        meta.left = left
+        meta.width = right - left
+        meta.height = bottom - top
+    meta.bits = (usize)(try main.uint(0x0a, 12))
+    let encoding = try main.uint(0x2d, 4)
+    if encoding != 4 or meta.bits != 12:
+        error(unsupported, "this RW2 raw format is not supported")
+    meta.coding = .panasonic
+    meta.data_offset = (usize)(try main.uint(0x118))
+    if meta.data_offset >= file.length:
+        error(corrupt, "RW2 raw data lies outside the file")
+    meta.data_size = file.length - meta.data_offset
+    # Tag 9 names the pattern at the sensor's corner: RGGB, GRBG, GBRG, BGGR.
+    let patterns: u8[16] = [0, 1, 1, 2, 1, 0, 2, 1, 1, 2, 0, 1, 2, 1, 1, 0]
+    let pattern = (usize)(try main.uint(0x09, 1))
+    if pattern < 1 or pattern > 4:
+        error(unsupported, "RW2 color filter pattern is not supported")
+    for p: usize in 0..<4:
+        meta.cfa[p] = patterns[(pattern - 1) * 4 + ((meta.top + p // 2) % 2) * 2 + (meta.left + p % 2) % 2]
+    # Black per color, plus the 15 raw format 4 leaves out.
+    let red = try main.real(0x1c)
+    let green = try main.real(0x1d)
+    let blue = try main.real(0x1e)
+    if red > 0.0 and green > 0.0 and blue > 0.0:
+        meta.black_rows = 2
+        meta.black_columns = 2
+        for p: usize in 0..<4:
+            let color = meta.cfa[p]
+            meta.black[p] = 15.0 + (red if color == 0 else blue if color == 2 else green)
+    let r = try main.real(0x24)
+    let g = try main.real(0x25)
+    let b = try main.real(0x26)
+    if r > 0.0 and g > 0.0 and b > 0.0:
+        meta.neutral = [g / r, 1.0, g / b]
+        meta.neutral_known = true
+    else:
+        let rb = try main.real(0x11)
+        let bb = try main.real(0x12)
+        if rb > 0.0 and bb > 0.0:
+            meta.neutral = [256.0 / rb, 1.0, 256.0 / bb]
+            meta.neutral_known = true
+
+## dcraw's panasonic_load_raw over pana_bits' rotated 16 KiB blocks.
+func unpack_panasonic(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
+    let data = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size)
+    var block: u8[16385]
+    var read: usize = 0
+    var bits: usize = 0
+    let w = mosaic.width
+    for y in 0..<mosaic.height:
+        var prediction: i32[2]
+        var nonzero: i32[2]
+        var shift: i32 = 0
+        for x in 0..<w:
+            let i = x % 14
+            if i == 0:
+                prediction = [0, 0]
+                nonzero = [0, 0]
+            let parity = i & 1
+            if i % 3 == 2:
+                shift = 4 >> (3 - (i32)(try pana_bits(data, block, &read, &bits, 2)))
+            if nonzero[parity] != 0:
+                let j = (i32)(try pana_bits(data, block, &read, &bits, 8))
+                if j != 0:
+                    prediction[parity] -= 0x80 << shift
+                    if prediction[parity] < 0 or shift == 4:
+                        prediction[parity] &= ~(-1 << shift)
+                    prediction[parity] += j << shift
+            else:
+                nonzero[parity] = (i32)(try pana_bits(data, block, &read, &bits, 8))
+                if nonzero[parity] != 0 or i > 11:
+                    prediction[parity] = (nonzero[parity] << 4) | (i32)(try pana_bits(data, block, &read, &bits, 4))
+            mosaic.data[y * w + x] = (u16)(prediction[x & 1] & 0xffff)
+
+## The next `count` bits of Panasonic's stream: each 16 KiB block is stored
+## starting 0x2008 bytes in, and read from its end backwards. A short last
+## block reads as zeros past the data.
+func pana_bits(data: const u8[], block: u8[], read: usize*, bits: usize*, count: usize) -> u32!:
+    if *bits == 0:
+        if *read >= data.length:
+            error(corrupt, "RW2 raw data is truncated")
+        let rotation: usize = 0x2008
+        memory.set(block, 0)
+        let first = (usize)math.imin((i64)(0x4000 - rotation), (i64)(data.length - *read))
+        memory.copy(block[rotation..], data[*read..], first)
+        let second = (usize)math.imin((i64)rotation, (i64)(data.length - *read - first))
+        memory.copy(block, data[*read + first..], second)
+        *read += 0x4000
+    *bits = (*bits + 0x20000 - count) & 0x1ffff
+    let at = (*bits >> 3) ^ 0x3ff0
+    let value = ((u32)block[at] | ((u32)block[at + 1] << 8)) >> (u32)(*bits & 7)
+    return value & (((u32)1 << (u32)count) - 1)

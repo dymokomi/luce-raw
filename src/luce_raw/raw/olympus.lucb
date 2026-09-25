@@ -1,0 +1,146 @@
+#==============================================================================================
+#
+#   raw/olympus - Olympus and OM System ORF
+#
+#   DESCRIPTION:
+#       An ORF is a TIFF (magic "RO" or "RS") with the raw in IFD0. Compressed ORFs
+#       code each pixel as a difference from a prediction chosen among its west,
+#       north and north-west same-color neighbours, with an adaptive bit width per
+#       column parity (dcraw's olympus_load_raw). The maker note ("OLYMPUS\0II")
+#       keeps the white balance, black levels, valid bits and crop in its
+#       ImageProcessing directory (0x2040).
+#
+#==============================================================================================
+
+## Fill `meta` from an Olympus ORF.
+func parse_orf(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
+    meta.format = "ORF"
+    let main = try tree.at(0)
+    meta.orientation = try main.uint(274, 1)
+    meta.raw_width = (usize)(try main.uint(256))
+    meta.raw_height = (usize)(try main.uint(257))
+    meta.little = main.little
+    let offsets = try main.find(273) else error(corrupt, "ORF raw has no strips")
+    let counts = try main.find(279) else error(corrupt, "ORF strips lack byte counts")
+    meta.data_offset = (usize)(try offsets.uint(0))
+    var total: usize = 0
+    for i in 0..<counts.count:
+        total += (usize)(try counts.uint(i))
+    meta.data_size = total
+    meta.bits = 12
+    if total >= meta.raw_width * meta.raw_height * 2:
+        meta.coding = .unpacked
+        meta.offsets = offsets
+        meta.counts = counts
+        meta.tile_width = meta.raw_width
+        meta.tile_height = (usize)(try main.uint(278, (u64)meta.raw_height))
+        meta.bits = 16
+    else:
+        meta.coding = .olympus
+    meta.cfa = [0, 1, 1, 2]
+    let exif = tree.exif else error(corrupt, "ORF has no EXIF directory")
+    try exif_cfa(&exif, meta)
+    let note = try exif.find(37500) else error(corrupt, "ORF has no maker note")
+    var start: usize = 0
+    var base: i64 = 0
+    if note.data.length > 16 and (str)note.data[..<8] == "OLYMPUS\0":
+        start = note.position + 12
+        base = (i64)note.position
+    elif note.data.length > 16 and (str)note.data[..<6] == "OLYMP\0":
+        start = note.position + 8
+    else:
+        error(unsupported, "ORF maker note has an unknown layout")
+    let maker = try Directory.open(file, base, start, main.little)
+    let pointer = try maker.find(0x2040) else error(corrupt, "ORF lacks its image processing directory")
+    let processing = try maker.child(try pointer.uint(0))
+    if let balance = try processing.find(0x100):
+        if balance.count >= 2:
+            let r = try balance.real(0)
+            let b = try balance.real(1)
+            if r > 0.0 and b > 0.0:
+                meta.neutral = [256.0 / r, 1.0, 256.0 / b]
+                meta.neutral_known = true
+    if let black = try processing.find(0x600):
+        if black.count == 4:
+            try canonical_black(meta, &black)
+    let valid = (usize)(try processing.uint(0x611, 12))
+    meta.white = [(f64)(((u64)1 << (u64)(valid if valid >= 8 and valid <= 16 else 12)) - 1), 0.0, 0.0]
+    meta.crop_x = (usize)(try processing.uint(0x612))
+    meta.crop_y = (usize)(try processing.uint(0x613))
+    meta.crop_width = (usize)(try processing.uint(0x614))
+    meta.crop_height = (usize)(try processing.uint(0x615))
+
+## The EXIF CFAPattern (0xa302): a 2×2 repeat, then its colors from the
+## sensor's corner.
+func exif_cfa(exif: const Directory*, meta: Meta*) -> !:
+    let pattern = try exif.find(0xa302) else return
+    if pattern.count != 8:
+        return
+    var reader = Reader(data = pattern.data, little = exif.little)
+    if try reader.uint(2) != 2 or try reader.uint(2) != 2:
+        error(unsupported, "only 2×2 color filter arrays are supported")
+    let codes = try reader.take(4)
+    for p: usize in 0..<4:
+        meta.cfa[p] = codes[((meta.top + p // 2) % 2) * 2 + (meta.left + p % 2) % 2]
+
+## dcraw's olympus_load_raw: adaptive-width differences from a predictor
+## among each pixel's same-color neighbours.
+func unpack_olympus(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
+    if meta.data_size < 8:
+        error(corrupt, "ORF raw data is truncated")
+    var reader = Bits(data = try binary.slice(file, (u64)meta.data_offset + 7, (u64)meta.data_size - 7))
+    let w = mosaic.width
+    let p = mosaic.data
+    for y in 0..<mosaic.height:
+        var carries: i32[6]
+        for x in 0..<w:
+            let c = (x & 1) * 3
+            let i: i32 = 2 if carries[c + 2] < 3 else 0
+            var bits: i32 = 2 + i
+            while (((carries[c] & 0xffff) >> (bits + i)) != 0) and bits < 16:
+                bits += 1
+            let head = (i32)(try reader.read(3))
+            let low = head & 3
+            let sign: i32 = -1 if (head & 4) != 0 else 0
+            # The high part: leading zeros of the next twelve bits, or an escape.
+            if reader.count < 32:
+                reader.fill()
+            var high = (i32)12
+            let window = reader.peek(12)
+            if window != 0:
+                high = 11 - (i32)leading(window)
+                try reader.skip((u32)high + 1)
+            else:
+                try reader.skip(12)
+                high = (i32)(try reader.read((u32)(16 - bits))) >> 1
+            carries[c] = (high << bits) | (i32)(try reader.read((u32)bits))
+            let delta = (carries[c] ^ sign) + carries[c + 1]
+            carries[c + 1] = (delta * 3 + carries[c + 1]) >> 5
+            carries[c + 2] = 0 if carries[c] > 16 else carries[c + 2] + 1
+            var prediction: i32 = 0
+            if y < 2 and x < 2:
+                prediction = 0
+            elif y < 2:
+                prediction = (i32)p[y * w + x - 2]
+            elif x < 2:
+                prediction = (i32)p[(y - 2) * w + x]
+            else:
+                let west = (i32)p[y * w + x - 2]
+                let north = (i32)p[(y - 2) * w + x]
+                let corner = (i32)p[(y - 2) * w + x - 2]
+                let dw = west - corner if west > corner else corner - west
+                let dn = north - corner if north > corner else corner - north
+                if (west < corner and corner < north) or (north < corner and corner < west):
+                    prediction = west + north - corner if dw > 32 or dn > 32 else (west + north) >> 1
+                else:
+                    prediction = west if dw > dn else north
+            p[y * w + x] = (u16)((prediction + ((delta << 2) | low)) & 0xffff)
+
+## The index of the highest set bit of a nonzero value.
+func leading(value: u32) -> u32:
+    var n: u32 = 0
+    var v = value
+    while v > 1:
+        v >>= 1
+        n += 1
+    return n
