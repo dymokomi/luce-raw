@@ -154,7 +154,11 @@ func decode_serial(data: const u8[], table: const Huffman*, code: SymbolCode, sy
     if count < 2:
         return false
     let chunks = try new Chunk[count] in memory.heap
-    defer release_chunks(chunks)
+    defer:
+        for i in 0..<chunks.length:
+            if chunks[i].starts.length > 0:
+                free(chunks[i].starts) in memory.heap
+        free(chunks) in memory.heap
     for j in 0..<count:
         chunks[j].begin = (u64)(data.length * j // count) * 8
         chunks[j].starts = try new u64[(usize)sync_window] in memory.heap
@@ -179,13 +183,6 @@ func decode_serial(data: const u8[], table: const Huffman*, code: SymbolCode, sy
     job.phase = 2
     try parallel(count, threads, (void*)&job, serial_chunk)
     return true
-
-## Free the chunks and their start lists.
-func release_chunks(chunks: Chunk[]):
-    for i in 0..<chunks.length:
-        if chunks[i].starts.length > 0:
-            free(chunks[i].starts) in memory.heap
-    free(chunks) in memory.heap
 
 ## A JPEG scan's entropy-coded bytes from `start` of `data` with the zero
 ## stuffed after each 0xFF dropped, up to the first marker: the buffer

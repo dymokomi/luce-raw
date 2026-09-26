@@ -194,7 +194,9 @@ func develop_pipelined(file: const u8[], meta: const Meta*, look: const Developm
     defer plan.close()
     var ranges = RangeJob(plane = &plane, rings = &develop_stage.hexagons, plan = &plan)
     var range_flags: Counter[]
-    defer release_flags(range_flags)
+    defer:
+        if range_flags.length > 0:
+            free(range_flags) in memory.heap
     if tiles.hexagons != none:
         # `pipelines` admits only planes large enough for a plan.
         let found = try walk_plan(&plane, &develop_stage.hexagons) else error(invalid, "X-Trans plane too small to pipeline")
@@ -241,8 +243,3 @@ func schedule(run: const Pipeline*, count: usize) -> u32[]!:
         order[1 + offsets[band]] = (u32)i
         offsets[band] += 1
     return order
-
-## Free band flags, if any.
-func release_flags(flags: Counter[]):
-    if flags.length > 0:
-        free(flags) in memory.heap
