@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-raw" {
     str owner = "dymokomi"
-    str version = "0.3.0"
+    str version = "0.3.1"
     str kind = "package"
     str language = "luce-base"
     str description = "Camera RAW decoding for Luce/Base: DNG, CR2, CR3, NEF, ARW, ORF, RW2, PEF and RAF (Bayer and X-Trans) to linear RGB, with AHD and Markesteijn demosaicing, tiled and half-size develops, and embedded previews."
@@ -19,7 +19,7 @@ def package "luce-raw" {
 
     def dependency "luce-compress" {
         str owner = "dymokomi"
-        str version = "^0.1.0"
+        str version = "^0.2.0"
         str path = "../luce-compress"
     }
 
