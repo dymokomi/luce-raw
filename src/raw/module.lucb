@@ -56,16 +56,16 @@
 ## `preview` finds the largest embedded JPEG. `info` and `white_balance` answer
 ## the as-shot white balance and the multipliers for any temperature and tint.
 import memory
-import math
+import luce_std.math
 import thread
 import os
 import time
-import binary
-import compress
+import luce_raster.binary
+import luce_compress.compress
 import testing
-from binary import Reader, Buffer
-from raster import Raster, SampleType
-from raster_errors import corrupt, unsupported, invalid, limit
+from luce_raster.binary import Reader, Buffer
+from luce_raster.model import Raster, SampleType
+from luce_raster.errors import corrupt, unsupported, invalid, limit
 
 ## How carefully to demosaic: `fast` is bilinear, `best` is AHD.
 pub enum Quality:

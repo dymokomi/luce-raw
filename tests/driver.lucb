@@ -7,13 +7,13 @@
 ##                                   f32 RGB rows, then OUT.txt with the size
 ##   driver bench FILE REPEAT        milliseconds per decode
 import c
-import files
+import luce_std.files
 import memory
 import strings
 import time
 import raw
-from raster import Raster
-from binary import Buffer
+from luce_raster.model import Raster
+from luce_raster.binary import Buffer
 
 func number(text: str) -> f64:
     var value = 0.0

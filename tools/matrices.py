@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate src/luce_raw/raw/matrices_*.lucb from LibRaw's colordata.cpp.
+"""Regenerate src/raw/matrices_*.lucb from LibRaw's colordata.cpp.
 
 The matrices are Adobe DNG Converter's XYZ(D65)-to-camera matrices, times 10000,
 as dcraw's adobe_coeff and LibRaw's colordata publish them, with the black and
@@ -15,7 +15,7 @@ MAKERS = {  # LibRaw maker: (file suffix, table name)
     "Olympus": ("olympus", "olympus_colors"), "Pentax": ("pentax", "pentax_colors"),
     "Ricoh": ("pentax", "ricoh_colors"),
 }
-ROOT = Path(__file__).resolve().parents[1] / "src/luce_raw/raw"
+ROOT = Path(__file__).resolve().parents[1] / "src/raw"
 
 def number(text):
     text = text.strip()

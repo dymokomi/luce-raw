@@ -58,7 +58,7 @@ def main():
     parser.add_argument("--fuzz", type=int, default=0, help="corruption rounds per sample")
     args = parser.parse_args()
     for flags in (["--native"], ["--backend=c"]):
-        run(BASE, "test", "src/luce_raw/raw", *flags, timeout=900)
+        run(BASE, "test", "src/raw", *flags, timeout=900)
     if args.quick:
         print("PASS luce-raw (unit tests)")
         return
