@@ -7,7 +7,7 @@
 ##                                   f32 RGB rows, then OUT.txt with the size
 ##   driver bench FILE REPEAT        milliseconds per decode
 import c
-import luce_std.files
+from luce_std import files
 import memory
 import strings
 import time

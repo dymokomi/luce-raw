@@ -12,7 +12,7 @@ same pixels as float32 tiles handed to a sink while the develop runs; or, in a
 fraction of a millisecond, the largest JPEG the camera embedded.
 
 ```luce
-import luce_raw.raw
+from luce_raw import raw
 from luce_raster.model import Raster
 
 var image = Raster(encoded = bytes)            # the file's bytes, owned by the Raster
