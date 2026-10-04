@@ -40,8 +40,9 @@ func text_file(path: str, body: fmt) -> !:
 
 pub func main(arguments: str[]) -> i32!:
     let command = arguments[1]
-    let data = try files.read((c.str)arguments[2])
-    defer free(data)
+    let file = try files.read((c.str)arguments[2])
+    defer file.release()
+    let data = file.value
     if command == "preview":
         var best: u64 = 0
         var found: raw.Preview? = none
