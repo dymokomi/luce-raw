@@ -113,7 +113,7 @@ func sony_private(file: const u8[], meta: Meta*, main: const Directory*, offset:
         return
     var key_reader = Reader(data = key.data, little = main.little)
     let secret = (u32)(try key_reader.uint(4))
-    let copy = try alloc u8[length] in memory.heap
+    let copy = try new u8[length] --- in memory.heap
     defer free(copy) in memory.heap
     memory.copy(copy, try binary.slice(file, (u64)at, (u64)length), length)
     sony_decrypt(copy, secret)

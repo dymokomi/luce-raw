@@ -16,7 +16,7 @@ struct Tree:
     var count: usize
     var exif: Directory?
 
-    mutating func add(directory: Directory) -> !:
+    func add(directory: Directory) -> !:
         if self.count == self.directories.length:
             error(limit, "raw file has too many TIFF directories")
         for i in 0..<self.count:
@@ -31,7 +31,7 @@ struct Tree:
         return self.directories[index] else error(invalid, "raw directory index out of range")
 
     ## Every directory of the TIFF whose header is at `start`, offsets from `base`.
-    static func walk(file: const u8[], start: usize, base: usize) -> Tree!:
+    func walk(file: const u8[], start: usize, base: usize) -> Tree!:
         let (little, first) = try tiff_header(file, start)
         var tree = Tree()
         var offset = first + base
@@ -233,8 +233,8 @@ func dng_color(meta: Meta*, main: const Directory*) -> !:
         if profile.matrices == 2 and try read_matrix(main, 50965, profile.forward2):
             profile.forwards = 2
     if try main.text(50931) == try main.text(50932):
-        discard(try read_matrix(main, 50723, profile.calibration1))
-        discard(try read_matrix(main, 50724, profile.calibration2))
+        _ = try read_matrix(main, 50723, profile.calibration1)
+        _ = try read_matrix(main, 50724, profile.calibration2)
     if let balance = try main.find(50727):
         if balance.count == 3:
             for i: usize in 0..<3:

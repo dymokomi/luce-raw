@@ -23,7 +23,7 @@ struct XtransScratch:
     var homogeneity: u8[]
     var sums: u16[]
 
-    static func create() -> XtransScratch!:
+    func create() -> XtransScratch!:
         let area = xtrans_side * xtrans_side
         var scratch = XtransScratch()
         errdefer scratch.close()
@@ -35,7 +35,7 @@ struct XtransScratch:
         scratch.sums = try new u16[xtrans_directions * area] in memory.heap
         return scratch
 
-    mutating func close():
+    func close():
         if self.source.length > 0:
             free(self.source) in memory.heap
         if self.rgb.length > 0:

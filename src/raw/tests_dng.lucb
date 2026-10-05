@@ -26,7 +26,7 @@ struct TiffOut:
 
     ## Add `tag` with `values` of `kind` (BYTE 1, ASCII 2, SHORT 3, LONG 4,
     ## RATIONAL 5 or SRATIONAL 10, whose values are numerator, denominator pairs).
-    mutating func add(tag: u16, kind: u16, values: const i64[]) -> !:
+    func add(tag: u16, kind: u16, values: const i64[]) -> !:
         var out = TagOut(tag = tag, kind = kind)
         let width: usize = 1 if kind == 1 or kind == 2 else 2 if kind == 3 else 4
         for value in values:
@@ -129,7 +129,7 @@ func synthetic_dng(jpeg: bool, orientation: i64 = 6, ramp: bool = false) -> Buff
 func develop_bytes(data: const u8[], options: Options) -> Raster!:
     var image = Raster()
     errdefer image.close()
-    image.encoded = try alloc u8[data.length] in memory.heap
+    image.encoded = try new u8[data.length] --- in memory.heap
     memory.copy(image.encoded, data, data.length)
     try probe(&image, options)
     try decode(&image, options)
@@ -165,7 +165,7 @@ func assemble(context: void*?, tile: const Tile*) -> !:
         for x in 0..<tile.width:
             for c in 0..<tile.channels:
                 into.pixels[((tile.y + y) * into.width + tile.x + x) * 4 + c] = tile.pixels[(y * tile.width + x) * tile.channels + c]
-    discard(into.covered.add(tile.width * tile.height))
+    _ = into.covered.add(tile.width * tile.height)
 
 ## `data` developed through `develop` with `options` into RGBA.
 func assembled(data: const u8[], options: Options) -> Assembly!:
@@ -218,9 +218,9 @@ test "the as-shot white balance round-trips through temperature and tint":
     let warmer = try white_balance(file.view(), shot.temperature * 0.7, shot.tint)
     assert(warmer.multipliers[2] > again.multipliers[2] * 1.05, "a warmer light does not raise blue's multiplier")
     var failed = false
-    discard(white_balance(file.view(), 100.0, 0.0) catch failure:
+    _ = white_balance(file.view(), 100.0, 0.0) catch failure:
         failed = true
-        recover shot)
+        recover shot
     assert(failed, "an impossible temperature was accepted")
 
 test "Robertson temperature and tint invert each other; D65 is about 6500 K":
@@ -284,7 +284,7 @@ test "recognize knows raws this package cannot develop, and probe names them":
     let crw = b"II\x1a\x00\x00\x00HEAPCCDR\x00\x00\x01\x00"
     assert(recognize(crw) and not detect(crw), "a CRW was not recognized as an undevelopable raw")
     var message = ""
-    discard(info(crw) catch failure:
+    _ = info(crw) catch failure:
         message = failure.message
-        recover Info())
+        recover Info()
     assert(message == "Canon CRW raws are not supported", "a CRW did not fail with its own message")

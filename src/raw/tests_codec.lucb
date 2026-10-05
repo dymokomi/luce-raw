@@ -16,7 +16,7 @@ struct BitWriter:
     var value: u32
     var count: u32
 
-    mutating func put(bits: u32, length: u32) -> !:
+    func put(bits: u32, length: u32) -> !:
         for i in 0..<length:
             self.value = (self.value << 1) | ((bits >> (length - 1 - i)) & 1)
             self.count += 1
@@ -27,7 +27,7 @@ struct BitWriter:
                 self.value = 0
                 self.count = 0
 
-    mutating func flush() -> !:
+    func flush() -> !:
         while self.count != 0:
             try self.put(1, 1)
 
@@ -156,9 +156,9 @@ test "Huffman tables decode dcraw's example code":
         assert(try table.decode(&reader) == (u32)expected, "Huffman symbol differs")
     assert(try table.decode(&reader) == 0xff, "the final padding code differs")
     var failed = false
-    discard(table.decode(&reader) catch failure:
+    _ = table.decode(&reader) catch failure:
         failed = true
-        recover 0)
+        recover 0
     assert(failed, "reading past the data succeeded")
 
 test "the JPEG bit reader drops stuffed zeros and stops at markers":
@@ -166,9 +166,9 @@ test "the JPEG bit reader drops stuffed zeros and stops at markers":
     var reader = Bits(data = stream, stuffed = true)
     assert(try reader.read(8) == 0xff and try reader.read(8) == 0x81, "stuffed byte mishandled")
     var failed = false
-    discard(reader.read(1) catch failure:
+    _ = reader.read(1) catch failure:
         failed = true
-        recover 0)
+        recover 0
     assert(failed, "the reader read through a marker")
 
 test "a lossless JPEG scan decodes alike on many threads and serially":

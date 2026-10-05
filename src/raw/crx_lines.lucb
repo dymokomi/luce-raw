@@ -35,7 +35,7 @@ struct CrxLine:
     var l1: i64
     var l2: i64
 
-    mutating func close():
+    func close():
         if self.data.length > 0:
             free(self.data) in memory.heap
         if self.progress.length > 0:

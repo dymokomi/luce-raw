@@ -17,7 +17,7 @@ struct Mosaic:
     var height: usize
     var samples: usize
 
-    static func create(width: usize, height: usize, samples: usize) -> Mosaic!:
+    func create(width: usize, height: usize, samples: usize) -> Mosaic!:
         let pixels = width *? height else error(limit, "raw sensor size overflows")
         let count = pixels *? samples else error(limit, "raw sensor size overflows")
         if count > 402653184:
@@ -25,11 +25,11 @@ struct Mosaic:
         return Mosaic(data = try new u16[count] in memory.heap, width = width, height = height, samples = samples)
 
     ## Store sample `s` of pixel (`x`, `y`), ignoring positions off the sensor.
-    mutating func put(x: usize, y: usize, s: usize, value: u16):
+    func put(x: usize, y: usize, s: usize, value: u16):
         if x < self.width and y < self.height:
             self.data[(y * self.width + x) * self.samples + s] = value
 
-    mutating func close():
+    func close():
         if self.data.length > 0:
             free(self.data) in memory.heap
         self = Mosaic()
@@ -175,7 +175,7 @@ func unpack_deflate_tile(data: const u8[], meta: const Meta*, mosaic: Mosaic*, x
         error(unsupported, "Deflate DNGs must have 8- or 16-bit samples")
     let bytes = meta.bits // 8
     let rows = th if y0 + th <= mosaic.height else mosaic.height - y0
-    let raw = try alloc u8[tw * ns * bytes * rows] in memory.heap
+    let raw = try new u8[tw * ns * bytes * rows] --- in memory.heap
     defer free(raw) in memory.heap
     try compress.inflate(data, raw)
     let p = meta.predictor
@@ -184,7 +184,7 @@ func unpack_deflate_tile(data: const u8[], meta: const Meta*, mosaic: Mosaic*, x
         error(unsupported, "DNG Deflate predictor is not supported")
     let columns = tw if x0 + tw <= mosaic.width else mosaic.width - x0
     let line = tw * ns
-    let values = try alloc u16[line] in memory.heap
+    let values = try new u16[line] --- in memory.heap
     defer free(values) in memory.heap
     for y in 0..<rows:
         for i in 0..<line:

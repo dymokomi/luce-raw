@@ -83,7 +83,7 @@ struct CrxImage:
     var tiles: CrxTile[]
     var data: const u8[]
 
-    mutating func close():
+    func close():
         for i in 0..<self.tiles.length:
             if self.tiles[i].table.length > 0:
                 free(self.tiles[i].table) in memory.heap

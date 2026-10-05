@@ -19,9 +19,9 @@ func parse_raf(file: const u8[], meta: Meta*) -> !:
     meta.make = "FUJIFILM"
     var header = Reader(data = file, position = 84, little = false)
     let jpeg = (usize)(try header.uint(4))
-    discard(try header.uint(4))
+    _ = try header.uint(4)
     let records = (usize)(try header.uint(4))
-    discard(try header.uint(4))
+    _ = try header.uint(4)
     let block = (usize)(try header.uint(4))
     var name = Reader(data = file, position = 28)
     meta.model = try name.cstring(32)
@@ -48,7 +48,7 @@ func parse_raf(file: const u8[], meta: Meta*) -> !:
                 meta.pattern[35 - k] = codes[k] & 3
             meta.xtrans = true
         if tag == 0x130 and length >= 2:
-            discard(try value.byte())
+            _ = try value.byte()
             if (try value.byte() & 8) == 0:
                 error(unsupported, "rotated (SuperCCD) RAF files are not supported")
         if tag == 0x110 and length >= 4:

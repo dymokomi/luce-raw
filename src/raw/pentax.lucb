@@ -103,7 +103,7 @@ func parse_pef(file: const u8[], meta: Meta*, tree: const Tree*) -> !:
 func unpack_pentax(file: const u8[], meta: const Meta*, mosaic: Mosaic*) -> !:
     var header = Reader(data = meta.extra, little = (meta.flags & 1) != 0)
     let used = (usize)((try header.uint(2) + 12) & 15)
-    discard(try header.take(12))
+    _ = try header.take(12)
     var codes: u16[16]
     var lengths: u8[16]
     for c in 0..<used:

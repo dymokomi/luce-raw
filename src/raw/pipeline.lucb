@@ -30,11 +30,11 @@ struct Progress:
     var aborted: @u32
 
     ## `count` producers (strips or planes) will report.
-    mutating func producers(count: usize):
+    func producers(count: usize):
         self.count = (usize)math.imin((i64)count, 16)
 
     ## Producer `part` has decoded its share of the first `rows` rows.
-    mutating func publish(part: usize, rows: usize):
+    func publish(part: usize, rows: usize):
         if part >= self.count:
             return
         self.parts[part].value.store((u32)rows)
@@ -42,16 +42,16 @@ struct Progress:
         for i in 0..<self.count:
             let done = self.parts[i].value.load()
             least = done if done < least else least
-        discard(self.rows.max(least))
+        _ = self.rows.max(least)
         self.rows.wake(0)
 
     ## Every row is decoded.
-    mutating func finish(rows: usize):
-        discard(self.rows.max((u32)rows))
+    func finish(rows: usize):
+        _ = self.rows.max((u32)rows)
         self.rows.wake(0)
 
     ## Wait for the first `rows` rows; false when the run was aborted.
-    mutating func await(rows: usize) -> bool:
+    func await(rows: usize) -> bool:
         while true:
             let now = self.rows.load()
             if self.aborted.load() != 0:
@@ -89,20 +89,20 @@ struct Pipeline:
     var schedule: u32[]
 
     ## Wake every waiter for good: the run failed.
-    mutating func abort():
+    func abort():
         self.progress.aborted.store(1)
         self.progress.rows.store(0xffffffff)
         self.progress.rows.wake(0)
         for i in 0..<self.level_flags.length:
-            discard(self.level_flags[i].value.cas(0, 2, .seq_cst, .seq_cst))
+            _ = self.level_flags[i].value.cas(0, 2, .seq_cst, .seq_cst)
             self.level_flags[i].value.wake(0)
         for i in 0..<self.range_flags.length:
-            discard(self.range_flags[i].value.cas(0, 2, .seq_cst, .seq_cst))
+            _ = self.range_flags[i].value.cas(0, 2, .seq_cst, .seq_cst)
             self.range_flags[i].value.wake(0)
 
     ## Wait until the plane's first `rows` rows are leveled and, for X-Trans,
     ## ranged; false when the run was aborted.
-    mutating func await_plane(rows: usize) -> bool:
+    func await_plane(rows: usize) -> bool:
         if rows == 0:
             return true
         let last = (rows - 1) // band_rows
@@ -161,7 +161,6 @@ func run_item(run: Pipeline*, index: usize, worker: usize) -> !:
     if not run.await_plane((usize)math.imin((i64)rows.end + 32, (i64)run.tiles.plane.height)):
         return
     try develop_item((void*)run.tiles, tile, worker)
-
 
 ## Whether `meta`'s raw develops through the pipeline: a demosaic heavy
 ## enough to overlap (`best`, full size), a coding that reports rows, no

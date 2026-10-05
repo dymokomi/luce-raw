@@ -26,7 +26,7 @@ struct LosslessJpeg:
     var line: usize
 
     ## Parse the markers up to the scan and prepare to decode its lines.
-    static func open(data: const u8[]) -> LosslessJpeg!:
+    func open(data: const u8[]) -> LosslessJpeg!:
         var jpeg = LosslessJpeg()
         errdefer jpeg.close()
         var reader = Reader(data = data, little = false)
@@ -56,7 +56,7 @@ struct LosslessJpeg:
                     identifiers[c] = try segment.byte()
                     if try segment.byte() != 0x11:
                         error(unsupported, "subsampled lossless JPEG (sRAW) is not supported")
-                    discard(try segment.byte())
+                    _ = try segment.byte()
             elif code == 0xc0 or code == 0xc1 or code == 0xc2 or (code >= 0xc5 and code <= 0xcf and code != 0xc8 and code != 0xcc):
                 error(unsupported, "only lossless (process 14) JPEG raws are supported")
             elif code == 0xc4:
@@ -92,7 +92,7 @@ struct LosslessJpeg:
                         error(corrupt, "lossless JPEG scan names a missing Huffman table")
                     jpeg.selectors[c] = selector
                 jpeg.predictor = (u32)(try segment.byte())
-                discard(try segment.byte())
+                _ = try segment.byte()
                 if (try segment.byte() & 15) != 0 or jpeg.predictor < 1 or jpeg.predictor > 7:
                     error(unsupported, "lossless JPEG predictor or point transform unsupported")
                 scanned = true
@@ -106,7 +106,7 @@ struct LosslessJpeg:
         return jpeg
 
     ## Decode the next line: `width` pixels of `components` interleaved samples.
-    mutating func next() -> const u16[]!:
+    func next() -> const u16[]!:
         if self.line >= self.height:
             error(corrupt, "lossless JPEG read past its last line")
         let samples = self.width * self.components
@@ -177,7 +177,7 @@ struct LosslessJpeg:
         self.line += 1
         return current
 
-    mutating func close():
+    func close():
         for i: usize in 0..<4:
             self.tables[i].close()
         if self.lines.length > 0:

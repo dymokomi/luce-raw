@@ -130,7 +130,7 @@ func unpack_nikon(file: const u8[], meta: const Meta*, mosaic: Mosaic*, threads:
     let version0 = try header.byte()
     let version1 = try header.byte()
     if version0 == 0x49 or version1 == 0x58:
-        discard(try header.take(2110))
+        _ = try header.take(2110)
     var tree: usize = 2 if version0 == 0x46 else 0
     if meta.bits == 14:
         tree += 3

@@ -37,7 +37,7 @@ struct CrxWavelet:
         let at = self.line[index] * (usize)self.width
         return self.storage[at..<at + (usize)self.width]
 
-    mutating func close():
+    func close():
         if self.storage.length > 0:
             free(self.storage) in memory.heap
         self = CrxWavelet()

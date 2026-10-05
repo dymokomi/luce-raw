@@ -37,7 +37,7 @@ struct Hexagons:
     var low: u16[]
     var high: u16[]
 
-    mutating func close():
+    func close():
         if self.low.length > 0:
             free(self.low) in memory.heap
         if self.high.length > 0:

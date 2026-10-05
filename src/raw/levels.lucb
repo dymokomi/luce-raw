@@ -27,7 +27,7 @@ struct Plane:
     func color(x: usize, y: usize) -> usize:
         return (usize)self.pattern[(y % 6) * 6 + x % 6]
 
-    mutating func close():
+    func close():
         if self.data.length > 0:
             free(self.data) in memory.heap
         self = Plane()
@@ -78,7 +78,7 @@ struct LevelTables:
     var of: u8[36]
 
     ## Tables for `job`, or none when the mosaic needs the general path.
-    static func plan(job: const Levels*) -> LevelTables?!:
+    func plan(job: const Levels*) -> LevelTables?!:
         let meta = job.meta
         let rows = meta.black_rows
         let columns = meta.black_columns
@@ -103,7 +103,7 @@ struct LevelTables:
         tables.data = try new u16[tables.count * 65536] in memory.heap
         return tables
 
-    mutating func close():
+    func close():
         if self.data.length > 0:
             free(self.data) in memory.heap
         self = LevelTables()
@@ -262,7 +262,7 @@ struct LevelStage:
     ## Allocate `plane` for `mosaic`'s active area, or its default crop (see
     ## normalize), and answer the Levels its bands run, which points into
     ## this stage.
-    mutating func open(meta: const Meta*, mosaic: const Mosaic*, look: const Development*, crop: bool, half: bool, plane: Plane*, threads: usize) -> Levels!:
+    func open(meta: const Meta*, mosaic: const Mosaic*, look: const Development*, crop: bool, half: bool, plane: Plane*, threads: usize) -> Levels!:
         errdefer self.close()
         let ox = meta.crop_x if crop else 0
         let oy = meta.crop_y if crop else 0
@@ -270,7 +270,7 @@ struct LevelStage:
         let height = meta.crop_height if crop else meta.height
         let nc = meta.samples
         let count = width *? height else error(limit, "raw image size overflows")
-        discard(count *? nc else error(limit, "raw image size overflows"))
+        _ = count *? nc else error(limit, "raw image size overflows")
         *plane = Plane(width = width, height = height, channels = nc)
         if half:
             plane.width = width // 2
@@ -303,7 +303,7 @@ struct LevelStage:
         self.bands = (plane.height + band_rows - 1) // band_rows
         return job
 
-    mutating func close():
+    func close():
         release(self.horizontal)
         release(self.vertical)
         self.tables.close()

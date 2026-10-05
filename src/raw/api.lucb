@@ -131,7 +131,7 @@ pub func probe(image: Raster*, options: Options = Options()) -> !:
     image.bits = 32
     if image.channels.length == 0:
         try image.standard(3, .float32)
-    discard(try image.validate())
+    _ = try image.validate()
     image.file_format = meta.format
     try image.attribute("make", "string", meta.make.bytes)
     try image.attribute("model", "string", meta.model.bytes)
@@ -222,7 +222,7 @@ pub struct Sensor:
     pub var white: f64
 
     ## Free the samples.
-    pub mutating func close():
+    pub func close():
         if self.samples.length > 0:
             free(self.samples) in memory.heap
         self = Sensor()

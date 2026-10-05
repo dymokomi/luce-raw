@@ -86,12 +86,12 @@ struct Directory:
     var little: bool = true
 
     ## The directory at `offset` of `file`, checked to lie inside it.
-    static func open(file: const u8[], base: i64, offset: usize, little: bool) -> Directory!:
+    func open(file: const u8[], base: i64, offset: usize, little: bool) -> Directory!:
         var reader = Reader(data = file, position = offset, little = little)
         let count = (usize)(try reader.uint(2))
         if count == 0 or count > 4096:
             error(corrupt, "TIFF directory has no or too many entries")
-        discard(try reader.take(count * 12 + 4))
+        _ = try reader.take(count * 12 + 4)
         return Directory(file = file, base = base, offset = offset, count = count, little = little)
 
     ## Entry `index`, its values located and bounds-checked.

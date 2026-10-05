@@ -114,7 +114,7 @@ struct Meta:
         return (usize)self.pattern[(y % 6) * 6 + x % 6]
 
     ## Check the layout fits the sensor and fill the defaults a parser left.
-    mutating func settle() -> !:
+    func settle() -> !:
         if self.raw_width == 0 or self.raw_height == 0 or self.raw_width > 100000 or self.raw_height > 100000:
             error(corrupt, "raw sensor dimensions are invalid")
         if self.width == 0 or self.height == 0:
@@ -148,7 +148,7 @@ struct Meta:
 
     ## Measure the black level from the masked pixels, when a parser named them:
     ## the mean of each 2×2 position, truncated, as LibRaw's crop_masked_pixels.
-    mutating func measure_black(mosaic: const Mosaic*):
+    func measure_black(mosaic: const Mosaic*):
         if self.mask[2] <= self.mask[0] or self.mask[3] <= self.mask[1] or self.mask[2] > mosaic.height or self.mask[3] > mosaic.width or mosaic.samples != 1:
             return
         var sums: u64[4]
@@ -166,7 +166,7 @@ struct Meta:
         for p: usize in 0..<4:
             self.black[p] = (f64)(sums[p] // counts[p])
 
-    mutating func close():
+    func close():
         if self.curve.length > 0:
             free(self.curve) in memory.heap
         var empty: u16[]

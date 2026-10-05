@@ -188,7 +188,7 @@ func decode_serial(data: const u8[], table: const Huffman*, code: SymbolCode, sy
 ## stuffed after each 0xFF dropped, up to the first marker: the buffer
 ## (release it) and how many of its bytes are used.
 func unstuff(data: const u8[], start: usize) -> (u8[], usize)!:
-    let out = try alloc u8[data.length - start] in memory.heap
+    let out = try new u8[data.length - start] --- in memory.heap
     var used: usize = 0
     var at = start
     let source = data.data

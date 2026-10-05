@@ -28,7 +28,7 @@ struct Bits:
     ## Top the buffer up to at least 57 bits, with zero padding past the data or
     ## at a JPEG marker: eight bytes at once where no 0xFF hides among them,
     ## byte by byte otherwise.
-    mutating func fill():
+    func fill():
         if self.count <= 56 and not self.marker and self.position + 8 <= self.data.length:
             let p = self.data.data + self.position
             let word = ((u64)p[0] << 56) | ((u64)p[1] << 48) | ((u64)p[2] << 40) | ((u64)p[3] << 32) | ((u64)p[4] << 24) | ((u64)p[5] << 16) | ((u64)p[6] << 8) | (u64)p[7]
@@ -59,7 +59,7 @@ struct Bits:
             self.count += 8
 
     ## The next `n` bits (at most 32) without consuming them.
-    mutating func peek(n: u32) -> u32:
+    func peek(n: u32) -> u32:
         if self.count < n:
             self.fill()
         if n == 0:
@@ -67,7 +67,7 @@ struct Bits:
         return (u32)(self.buffer >> (64 - n))
 
     ## Consume `n` bits already peeked; an error when they run past the data.
-    mutating func skip(n: u32) -> !:
+    func skip(n: u32) -> !:
         if self.count < n:
             self.fill()
         self.buffer = self.buffer << n if n < 64 else 0
@@ -76,7 +76,7 @@ struct Bits:
             error(corrupt, "raw bit stream is truncated")
 
     ## Read `n` bits (at most 32).
-    mutating func read(n: u32) -> u32!:
+    func read(n: u32) -> u32!:
         let value = self.peek(n)
         try self.skip(n)
         return value
@@ -84,7 +84,7 @@ struct Bits:
     ## Skip to just past the next JPEG restart marker and start afresh there, as
     ## each restart interval begins on a byte boundary. The marker stops `fill`,
     ## so no buffered byte lies beyond it.
-    mutating func restart() -> !:
+    func restart() -> !:
         var at = self.position
         while at + 1 < self.data.length and not (self.data[at] == 255 and self.data[at + 1] >= 0xd0 and self.data[at + 1] <= 0xd7):
             at += 1
@@ -104,7 +104,7 @@ struct Huffman:
     var bits: u32
 
     ## The code with `counts[n]` codes of length n + 1 and the symbols in order.
-    static func build(counts: const u8[], symbols: const u8[]) -> Huffman!:
+    func build(counts: const u8[], symbols: const u8[]) -> Huffman!:
         if counts.length != 16:
             error(corrupt, "Huffman table needs sixteen counts")
         var longest: u32 = 0
@@ -131,7 +131,7 @@ struct Huffman:
         return Huffman(table = table, bits = longest)
 
     ## A code given as a ready table, as some raw formats describe theirs.
-    static func custom(bits: u32, entries: const u16[]) -> Huffman!:
+    func custom(bits: u32, entries: const u16[]) -> Huffman!:
         if bits == 0 or bits > 16 or entries.length != (usize)1 << bits:
             error(corrupt, "invalid Huffman lookup table")
         let table = try new u16[entries.length] in memory.heap
@@ -146,7 +146,7 @@ struct Huffman:
         try reader.skip((u32)(entry >> 8))
         return (u32)(entry & 255)
 
-    mutating func close():
+    func close():
         if self.table.length > 0:
             free(self.table) in memory.heap
         self = Huffman()

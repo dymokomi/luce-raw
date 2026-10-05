@@ -27,7 +27,7 @@ struct Workspace:
     var pixels: f32[]
     var ready: bool
 
-    mutating func prepare(job: const Job*) -> !:
+    func prepare(job: const Job*) -> !:
         errdefer self.close()
         if job.hexagons != none:
             self.xtrans = try XtransScratch.create()
@@ -37,7 +37,7 @@ struct Workspace:
         self.pixels = try new f32[job.tile * job.tile * job.channels] in memory.heap
         self.ready = true
 
-    mutating func close():
+    func close():
         self.ahd.close()
         self.xtrans.close()
         if self.rgb.length > 0:
@@ -161,8 +161,8 @@ func develop_item(context: void*, index: usize, worker: usize) -> !:
     output_rect(job, space.rgb.data, sw, sh, space.pixels.data, base, su, sv)
     let tile = Tile(x = across.start, y = down.start, width = ow, height = oh, channels = job.channels, pixels = space.pixels[..<ow * oh * job.channels])
     try job.sink(job.context, &tile)
-    discard(job.demosaic_ns.add(demosaiced - started))
-    discard(job.output_ns.add(time.now() - demosaiced))
+    _ = job.demosaic_ns.add(demosaiced - started)
+    _ = job.output_ns.add(time.now() - demosaiced)
 
 ## Demosaic the plane's [x0, x1) × [y0, y1) (at most `block_size` square) into
 ## `rgb`, rows of `stride` pixels, from (`ox`, `oy`).
@@ -258,7 +258,7 @@ struct DevelopStage:
     ## Prepare to develop `plane` (see develop_plane) and answer the Job the
     ## tiles run, which points into this stage. With `ranges` false the
     ## X-Trans green ranges are left for the caller to fill.
-    mutating func open(plane: const Plane*, look: const Development*, quality: Quality, gain: f64, orientation: u64, tile: usize, alpha: bool, threads: usize, context: void*?, sink: func(void*?, const Tile*) -> unit!, ranges: bool) -> Job!:
+    func open(plane: const Plane*, look: const Development*, quality: Quality, gain: f64, orientation: u64, tile: usize, alpha: bool, threads: usize, context: void*?, sink: func(void*?, const Tile*) -> unit!, ranges: bool) -> Job!:
         errdefer self.close()
         if tile == 0 or tile > 16384:
             error(invalid, "raw tile size must be 1 to 16384")
@@ -280,7 +280,7 @@ struct DevelopStage:
             job.hexagons = &self.hexagons
         return job
 
-    mutating func close():
+    func close():
         self.table.close()
         self.hexagons.close()
         if self.spaces.length > 0:

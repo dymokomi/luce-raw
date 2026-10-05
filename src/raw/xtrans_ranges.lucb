@@ -33,7 +33,7 @@ struct WalkPlan:
     var real_height: usize
     var real_width: usize
 
-    mutating func close():
+    func close():
         if self.dy.length > 0:
             free(self.dy) in memory.heap
         if self.dx.length > 0:
@@ -138,9 +138,9 @@ func ranges_band(context: void*, index: usize, worker: usize) -> !:
     let first = (usize)math.imax(2, (i64)(index * band_height))
     let end = (usize)math.imin((i64)((index + 1) * band_height), (i64)plane.height - 2)
     for row in first..<end:
-        let small_row = plan.small(row, plane.height, plan.height) * plan.width
+        let small_row = WalkPlan.small(row, plane.height, plan.height) * plan.width
         for col in 2..<w - 2:
-            let entry = small_row + plan.small(col, w, plan.width)
+            let entry = small_row + WalkPlan.small(col, w, plan.width)
             let dy = plan.dy[entry]
             if dy == unvisited:
                 continue

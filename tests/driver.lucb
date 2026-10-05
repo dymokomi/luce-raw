@@ -33,9 +33,9 @@ func number(text: str) -> f64:
 
 func text_file(path: str, body: fmt) -> !:
     var buffer: u8[4096]
-    let text = try format(buffer, body)
+    let text = try strings.format(buffer, body)
     var name: u8[1024]
-    let where = try format(name, f"{path}.txt")
+    let where = try strings.format(name, f"{path}.txt")
     try files.write((c.str)where, text.bytes)
 
 pub func main(arguments: str[]) -> i32!:
@@ -98,7 +98,7 @@ pub func main(arguments: str[]) -> i32!:
         var image = Raster(max_bytes = 8589934592, max_pixels = 1073741824)
         defer image.close()
         with memory.heap:
-            image.encoded = try alloc u8[data.length]
+            image.encoded = try new u8[data.length] ---
         memory.copy(image.encoded, data, data.length)
         try raw.probe(&image, options)
         try raw.decode(&image, options)
@@ -135,7 +135,7 @@ pub func main(arguments: str[]) -> i32!:
             var image = Raster(max_bytes = 8589934592, max_pixels = 1073741824)
             defer image.close()
             with memory.heap:
-                image.encoded = try alloc u8[data.length]
+                image.encoded = try new u8[data.length] ---
             memory.copy(image.encoded, data, data.length)
             var timings = raw.Timings()
             options.timings = &timings
@@ -158,4 +158,4 @@ struct Counter:
 
 func count_tile(context: void*?, tile: const raw.Tile*) -> !:
     let counter = (Counter*)(context else return)
-    discard(counter.pixels.add(tile.width * tile.height))
+    _ = counter.pixels.add(tile.width * tile.height)

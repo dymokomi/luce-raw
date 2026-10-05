@@ -44,7 +44,7 @@ struct FujiParams:
     var xtrans: bool
     var lossless: bool
 
-    mutating func close():
+    func close():
         if self.tables.length > 0:
             free(self.tables) in memory.heap
         self = FujiParams()
