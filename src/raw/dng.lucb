@@ -31,7 +31,7 @@ struct Tree:
         return self.directories[index] else error(invalid, "raw directory index out of range")
 
     ## Every directory of the TIFF whose header is at `start`, offsets from `base`.
-    func walk(file: const u8[], start: usize, base: usize) -> Tree!:
+    static func walk(file: const u8[], start: usize, base: usize) -> Tree!:
         let (little, first) = try tiff_header(file, start)
         var tree = Tree()
         var offset = first + base

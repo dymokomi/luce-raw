@@ -78,7 +78,7 @@ struct LevelTables:
     var of: u8[36]
 
     ## Tables for `job`, or none when the mosaic needs the general path.
-    func plan(job: const Levels*) -> LevelTables?!:
+    static func plan(job: const Levels*) -> LevelTables?!:
         let meta = job.meta
         let rows = meta.black_rows
         let columns = meta.black_columns

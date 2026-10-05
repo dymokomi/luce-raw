@@ -41,7 +41,7 @@ struct WalkPlan:
         self = WalkPlan()
 
     ## The plan row standing for real row `row` (likewise for columns).
-    func small(row: usize, real: usize, size: usize) -> usize:
+    static func small(row: usize, real: usize, size: usize) -> usize:
         if row < plan_edge:
             return row
         if row >= real - plan_edge:

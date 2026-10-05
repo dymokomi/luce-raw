@@ -104,7 +104,7 @@ struct Huffman:
     var bits: u32
 
     ## The code with `counts[n]` codes of length n + 1 and the symbols in order.
-    func build(counts: const u8[], symbols: const u8[]) -> Huffman!:
+    static func build(counts: const u8[], symbols: const u8[]) -> Huffman!:
         if counts.length != 16:
             error(corrupt, "Huffman table needs sixteen counts")
         var longest: u32 = 0
@@ -131,7 +131,7 @@ struct Huffman:
         return Huffman(table = table, bits = longest)
 
     ## A code given as a ready table, as some raw formats describe theirs.
-    func custom(bits: u32, entries: const u16[]) -> Huffman!:
+    static func custom(bits: u32, entries: const u16[]) -> Huffman!:
         if bits == 0 or bits > 16 or entries.length != (usize)1 << bits:
             error(corrupt, "invalid Huffman lookup table")
         let table = try new u16[entries.length] in memory.heap

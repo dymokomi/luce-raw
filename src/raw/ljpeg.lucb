@@ -26,7 +26,7 @@ struct LosslessJpeg:
     var line: usize
 
     ## Parse the markers up to the scan and prepare to decode its lines.
-    func open(data: const u8[]) -> LosslessJpeg!:
+    static func open(data: const u8[]) -> LosslessJpeg!:
         var jpeg = LosslessJpeg()
         errdefer jpeg.close()
         var reader = Reader(data = data, little = false)

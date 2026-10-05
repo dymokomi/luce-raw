@@ -17,7 +17,7 @@ struct Mosaic:
     var height: usize
     var samples: usize
 
-    func create(width: usize, height: usize, samples: usize) -> Mosaic!:
+    static func create(width: usize, height: usize, samples: usize) -> Mosaic!:
         let pixels = width *? height else error(limit, "raw sensor size overflows")
         let count = pixels *? samples else error(limit, "raw sensor size overflows")
         if count > 402653184:

@@ -22,7 +22,7 @@ struct LabTable:
     var blue_yellow: i32[]
     var to_xyz: i64[9]
 
-    func create(to_xyz: f64[9]) -> LabTable!:
+    static func create(to_xyz: f64[9]) -> LabTable!:
         var table = LabTable()
         errdefer table.close()
         table.lightness = try new i32[65536] in memory.heap
@@ -63,7 +63,7 @@ struct AhdScratch:
     var homogeneity: u8[]
     var capacity: usize
 
-    func create(tile: usize) -> AhdScratch!:
+    static func create(tile: usize) -> AhdScratch!:
         let size = (tile + 6) * (tile + 6)
         var scratch = AhdScratch(capacity = size)
         errdefer scratch.close()
