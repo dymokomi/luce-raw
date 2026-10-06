@@ -14,37 +14,16 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: luce-raw
-      - id: pins
-        run: |
-          echo "base=$(cat luce-raw/bootstrap/BASE)" >> "$GITHUB_OUTPUT"
-          echo "raster=$(cat luce-raw/bootstrap/RASTER)" >> "$GITHUB_OUTPUT"
-          echo "compress=$(cat luce-raw/bootstrap/COMPRESS)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-base
-          ref: ${{ steps.pins.outputs.base }}
           path: luce-base
-      - name: Check out the pinned library packages
+      # every dependency at main, beside this checkout (luce-base docs/CI.md)
+      - name: Check out dependencies at main
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
-          while read -r name revision; do
-            revision=${revision%$'\r'}
-            [ -n "$name" ] || continue
-            git init -q "$name"
-            git -C "$name" fetch -q --depth 1 "https://github.com/dymokomi/$name.git" "$revision"
-            git -C "$name" checkout -q --detach FETCH_HEAD
-          done < luce-raw/bootstrap/PACKAGES
-      - uses: actions/checkout@v7
-        with:
-          repository: dymokomi/luce-raster
-          ref: ${{ steps.pins.outputs.raster }}
-          path: luce-raster
-      - uses: actions/checkout@v7
-        with:
-          repository: dymokomi/luce-compress
-          ref: ${{ steps.pins.outputs.compress }}
-          path: luce-compress
+          python3 luce-base/tools/checkout_main.py luce-raw
       - name: Select Clang
         run: |
           mkdir -p "$RUNNER_TEMP/luce-bin"
