@@ -75,12 +75,21 @@ func normalized_model(model: str, buffer: u8[]) -> str:
         i += 1
     return (str)buffer[..<n]
 
+## Bodies the tables do not list yet that share a listed body's sensor and color
+## filters, as the listed body's model: Fujifilm's X-E5 has the X-T5's 40 MP
+## X-Trans 5 HR sensor (LibRaw already gives the X-T5 and X-T50 one matrix for
+## that reason).
+func sensor_twin(make: str, model: str) -> str:
+    if starts(make, "FUJIFILM") and model == "X-E5":
+        return "X-T5"
+    return model
+
 ## Give `meta` its camera's matrix, and its levels when `levels`, from the
 ## tables, or the generic matrix when the camera is not listed. A DNG without
 ## color matrices takes the matrix only: its levels are its own.
 func lookup_matrix(meta: Meta*, levels: bool):
     var buffer: u8[96]
-    let model = normalized_model(table_model(meta.make, meta.model), buffer)
+    let model = sensor_twin(meta.make, normalized_model(table_model(meta.make, meta.model), buffer))
     meta.profile = Profile(matrices = 1)
     meta.profile.color1 = [3.2404542, -1.5371385, -0.4985314, -0.9692660, 1.8760108, 0.0415560, 0.0556434, -0.2040259, 1.0572252]
     meta.matrix = "generic"
