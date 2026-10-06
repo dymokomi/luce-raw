@@ -75,6 +75,12 @@ try raw.develop(bytes, options, (void*)&canvas, paint)
   temperature answers the as-shot balance. Temperature and tint use Adobe's
   convention (Robertson's isotemperature lines, tint positive towards magenta), so
   the as-shot numbers read like Camera Raw's.
+- `rendering(data, temperature = 0, tint = 0) -> Rendering`: how the camera turns
+  balanced values into color for one white balance: `balance` (as `white_balance`),
+  `to_srgb` (row-major, balanced camera values to linear sRGB) and `gain` (the
+  baseline exposure). An editor develops once with `camera` set, which gives values
+  balanced as shot. It then applies a new balance as the ratio of multipliers,
+  followed by that balance's `to_srgb`, on the GPU without demosaicing again.
 - `sensor(data) -> Sensor`: the raw sensor samples after the file's linearization,
   with the active area, filter pattern (2×2 `cfa`, and the 6×6 `pattern` with an
   `xtrans` flag), black and white levels.

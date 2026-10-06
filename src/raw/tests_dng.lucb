@@ -223,6 +223,24 @@ test "the as-shot white balance round-trips through temperature and tint":
         recover shot
     assert(failed, "an impossible temperature was accepted")
 
+test "camera values through rendering's matrix are the developed sRGB":
+    var file = try synthetic_dng(false, orientation = 1, ramp = true)
+    defer file.close()
+    var developed = try develop_bytes(file.view(), Options(threads = 1))
+    defer developed.close()
+    var camera = try develop_bytes(file.view(), Options(threads = 1, camera = true))
+    defer camera.close()
+    let color = try rendering(file.view())
+    let shot = (try info(file.view())).as_shot
+    for c: usize in 0..<3:
+        assert(math.abs(color.balance.multipliers[c] - shot.multipliers[c]) < 1e-9, "rendering's balance is not the as-shot one")
+    let m = color.to_srgb
+    for at in 0..<developed.width * developed.height:
+        let p = camera.pixels[at * 3..<at * 3 + 3]
+        for row: usize in 0..<3:
+            let value = math.max(0.0, m[row * 3] * p[0] + m[row * 3 + 1] * p[1] + m[row * 3 + 2] * p[2])
+            assert(math.abs(value - developed.pixels[at * 3 + row]) < 1e-4, "the matrix does not reproduce the develop")
+
 test "Robertson temperature and tint invert each other; D65 is about 6500 K":
     for kelvin in [2500.0, 3200.0, 5003.0, 6504.0, 9000.0]:
         for tint in [-40.0, 0.0, 25.0]:

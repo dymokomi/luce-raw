@@ -117,6 +117,22 @@ pub func white_balance(data: const u8[], temperature: f64, tint: f64) -> WhiteBa
     defer meta.close()
     return (try development(&meta, temperature, tint)).balance
 
+## How `data`'s camera turns white-balanced values into color, for an editor that
+## develops once with `camera` set and applies white balance and the color
+## matrix itself: `balance` is `white_balance`'s for `temperature` and `tint`
+## (zero temperature: as shot), and `to_srgb` takes values balanced with its
+## multipliers to linear sRGB (D65), row-major. A develop with `camera` gives
+## camera values balanced with the as-shot multipliers; another balance is
+## those values times its multipliers over the as-shot ones, then its `to_srgb`.
+## `gain` is the baseline exposure `Options.exposure` applies (2^stops).
+pub func rendering(data: const u8[], temperature: f64 = 0.0, tint: f64 = 0.0) -> Rendering!:
+    if temperature < 0.0 or (temperature > 0.0 and (temperature < 1667.0 or temperature > 50000.0)) or tint < -150.0 or tint > 150.0:
+        error(invalid, "temperature must be 1667-50000 K and tint within ±150")
+    var meta = try parse(data)
+    defer meta.close()
+    let look = try development(&meta, temperature, tint)
+    return Rendering(balance = look.balance, to_srgb = look.to_rgb, gain = math.exp2(meta.baseline_exposure))
+
 ## Size `image` for `image.encoded`: three float channels R, G and B at the
 ## developed size, with the format, camera and matrix source as attributes
 ## ("make", "model", "raw.matrix").

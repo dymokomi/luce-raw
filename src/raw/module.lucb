@@ -81,6 +81,12 @@ pub struct WhiteBalance:
     pub var tint: f64
     pub var multipliers: f64[3]
 
+## A camera's color for one white balance (see `rendering`).
+pub struct Rendering:
+    pub var balance: WhiteBalance
+    pub var to_srgb: f64[9]
+    pub var gain: f64
+
 ## How to develop a raw. A zero `temperature` keeps the as-shot white balance;
 ## otherwise `temperature` and `tint` choose it. `exposure` applies the file's
 ## baseline exposure; `crop` applies the camera's default crop; `camera` skips
