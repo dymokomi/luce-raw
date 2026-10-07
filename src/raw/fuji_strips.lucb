@@ -290,4 +290,4 @@ func unpack_fuji(file: const u8[], meta: const Meta*, mosaic: Mosaic*, threads: 
         job.offsets[b] = total
         total = (usize)math.imin((i64)(total + lengths[b]), (i64)job.strips.length)
     job.offsets[params.blocks] = total
-    try parallel(params.blocks, threads, (void*)&job, fuji_strip)
+    try parallel.for_each(params.blocks, (void*)&job, fuji_strip, threads = threads)

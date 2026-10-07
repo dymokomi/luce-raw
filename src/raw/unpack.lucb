@@ -60,7 +60,7 @@ func unpack_into(file: const u8[], meta: const Meta*, mosaic_pointer: Mosaic*, t
         .unknown: error(unsupported, "raw sample coding is not supported")
     if meta.curve.length == 65536:
         var job = Rows(file = file, meta = meta, mosaic = mosaic)
-        try parallel((mosaic.height + band_height - 1) // band_height, threads, (void*)&job, curve_band)
+        try parallel.for_each((mosaic.height + band_height - 1) // band_height, (void*)&job, curve_band, threads = threads)
 
 ## Rows of the mosaic that one parallel item handles.
 let band_height: usize = 32
@@ -117,7 +117,7 @@ func unpack_tiles(file: const u8[], meta: const Meta*, mosaic: Mosaic*, threads:
     if meta.offsets.count != across * down or meta.counts.count != across * down:
         error(corrupt, "raw tile table does not match the image")
     var job = Tiles(file = file, meta = meta, mosaic = mosaic, across = across)
-    try parallel(across * down, threads, (void*)&job, unpack_tile)
+    try parallel.for_each(across * down, (void*)&job, unpack_tile, threads = threads)
 
 ## Samples of `meta.bits` each, rows starting on a byte boundary: whole bytes
 ## for 8 and 16 bits in the file's byte order, most significant bit first

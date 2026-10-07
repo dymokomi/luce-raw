@@ -305,4 +305,4 @@ func unpack_crx(file: const u8[], meta: const Meta*, mosaic: Mosaic*, threads: u
     var job = CrxJob(image = &image, mosaic = mosaic, progress = progress)
     if let tracker = progress:
         tracker.producers(4)
-    try parallel(4, threads, (void*)&job, crx_plane)
+    try parallel.for_each(4, (void*)&job, crx_plane, threads = threads)

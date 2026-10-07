@@ -24,7 +24,6 @@
 #                      Olympus ORF, Panasonic RW2, Pentax PEF and Fujifilm RAF
 #       fuji_compressed.lucb, fuji_strips.lucb
 #                      Fujifilm's compressed RAF coding
-#       parallel.lucb  independent work items on several threads
 #       serial.lucb    serial Huffman streams decoded on several threads
 #       unpack.lucb    sensor samples out of the file into a 16-bit mosaic
 #       matrices.lucb, matrices_*.lucb
@@ -57,7 +56,7 @@
 ## the as-shot white balance and the multipliers for any temperature and tint.
 import memory
 from luce_std import math
-import thread
+from luce_std import parallel
 import os
 import time
 from luce_raster import binary

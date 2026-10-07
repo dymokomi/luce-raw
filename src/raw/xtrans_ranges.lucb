@@ -164,7 +164,7 @@ func green_ranges(plane: const Plane*, rings: Hexagons*, threads: usize) -> !:
         var plan = found
         defer plan.close()
         var job = RangeJob(plane = plane, rings = rings, plan = &plan)
-        try parallel((plane.height + band_height - 1) // band_height, threads, (void*)&job, ranges_band)
+        try parallel.for_each((plane.height + band_height - 1) // band_height, (void*)&job, ranges_band, threads = threads)
     else:
         try green_walk(plane, rings)
 

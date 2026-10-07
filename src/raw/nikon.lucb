@@ -225,7 +225,7 @@ func nikon_samples(mosaic: Mosaic*, vertical: u16[4], curve: const u16[], thread
             column[v] = column[v] +% row[x]
             row[x] = column[v]
     var job = NikonRows(mosaic = mosaic, curve = curve.data)
-    try parallel((mosaic.height + band_height - 1) // band_height, threads, (void*)&job, nikon_band)
+    try parallel.for_each((mosaic.height + band_height - 1) // band_height, (void*)&job, nikon_band, threads = threads)
 
 ## Rows [band_height × index, …) of `nikon_samples`.
 func nikon_band(context: void*, index: usize, worker: usize) -> !:

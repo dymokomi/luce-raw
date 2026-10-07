@@ -160,7 +160,7 @@ func unpack_sony_ljpeg_tile(data: const u8[], mosaic: Mosaic*, x0: usize, y0: us
 ## Samples are stored as tone curve indexes; unpack applies the curve.
 func unpack_arw2(file: const u8[], meta: const Meta*, mosaic: Mosaic*, threads: usize) -> !:
     var job = Rows(file = try binary.slice(file, (u64)meta.data_offset, (u64)meta.data_size), meta = meta, mosaic = mosaic)
-    try parallel((mosaic.height + band_height - 1) // band_height, threads, (void*)&job, arw2_band)
+    try parallel.for_each((mosaic.height + band_height - 1) // band_height, (void*)&job, arw2_band, threads = threads)
 
 ## Rows [band_height × index, …) of an ARW2 mosaic; rows are independent.
 func arw2_band(context: void*, index: usize, worker: usize) -> !:

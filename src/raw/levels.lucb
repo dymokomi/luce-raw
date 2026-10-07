@@ -299,7 +299,7 @@ struct LevelStage:
         if let planned = try LevelTables.plan(&job):
             self.tables = planned
             job.tables = &self.tables
-            try parallel(self.tables.count, threads, (void*)&job, level_table)
+            try parallel.for_each(self.tables.count, (void*)&job, level_table, threads = threads)
         self.bands = (plane.height + band_rows - 1) // band_rows
         return job
 
@@ -356,5 +356,5 @@ func normalize(meta: const Meta*, mosaic: const Mosaic*, look: const Development
     var stage = LevelStage()
     defer stage.close()
     var job = try stage.open(meta, mosaic, look, crop, half, &plane, threads)
-    try parallel(stage.bands, threads, (void*)&job, level_band)
+    try parallel.for_each(stage.bands, (void*)&job, level_band, threads = threads)
     return plane

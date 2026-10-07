@@ -165,7 +165,7 @@ func decode_serial(data: const u8[], table: const Huffman*, code: SymbolCode, sy
     var job = SerialJob(data = data, table = table.table.data, shift = 64 - table.bits, code = code, symbols = symbols, chunks = chunks.data, chunk_count = count, deltas = deltas)
     for phase: u32 in 0..<2:
         job.phase = phase
-        try parallel(count, threads, (void*)&job, serial_chunk)
+        try parallel.for_each(count, (void*)&job, serial_chunk, threads = threads)
     # Each chunk's true symbols run from its meeting point to the next one.
     var first: usize = 0
     for j in 0..<count:
@@ -181,7 +181,7 @@ func decode_serial(data: const u8[], table: const Huffman*, code: SymbolCode, sy
             chunk.count = symbols - first
         first += chunk.count
     job.phase = 2
-    try parallel(count, threads, (void*)&job, serial_chunk)
+    try parallel.for_each(count, (void*)&job, serial_chunk, threads = threads)
     return true
 
 ## A JPEG scan's entropy-coded bytes from `start` of `data` with the zero
@@ -254,7 +254,7 @@ func decode_jpeg_parallel(jpeg: LosslessJpeg*, data: const u8[], threads: usize)
             jpeg_line(out, y, line, nc, p)
     if p == 1:
         var job = JpegLines(samples = out, line = line, nc = nc, lines = jpeg.height)
-        try parallel((jpeg.height + band_height - 1) // band_height, threads, (void*)&job, jpeg_lines)
+        try parallel.for_each((jpeg.height + band_height - 1) // band_height, (void*)&job, jpeg_lines, threads = threads)
     jpeg.line = jpeg.height
     return samples
 

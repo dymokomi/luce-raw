@@ -269,7 +269,7 @@ struct DevelopStage:
         let height = plane.width if o >= 5 else plane.height
         let across = (width + tile - 1) // tile
         self.count = across * ((height + tile - 1) // tile)
-        self.spaces = try new Workspace[workers(self.count, threads)] in memory.heap
+        self.spaces = try new Workspace[parallel.workers(self.count, threads)] in memory.heap
         var job = Job(plane = plane, table = &self.table, quality = quality, orientation = o, width = width, height = height, tile = tile, across = across, channels = 4 if alpha else 3, context = context, sink = sink, spaces = self.spaces.data)
         let k = gain / 65535.0
         for i: usize in 0..<9:
@@ -294,5 +294,5 @@ func develop_plane(plane: const Plane*, look: const Development*, quality: Quali
     var stage = DevelopStage()
     defer stage.close()
     var job = try stage.open(plane, look, quality, gain, orientation, tile, alpha, threads, context, sink, true)
-    try parallel(stage.count, stage.spaces.length, (void*)&job, develop_item)
+    try parallel.for_each(stage.count, (void*)&job, develop_item, threads = stage.spaces.length)
     return (job.demosaic_ns.load(), job.output_ns.load())

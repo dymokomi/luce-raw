@@ -206,7 +206,7 @@ func develop_pipelined(file: const u8[], meta: const Meta*, look: const Developm
     let count = 1 + level_flags.length + range_flags.length + develop_stage.count
     run.schedule = try schedule(&run, count)
     defer free(run.schedule) in memory.heap
-    try parallel(count, threads, (void*)&run, pipeline_item)
+    try parallel.for_each(count, (void*)&run, pipeline_item, threads = threads)
     let finished = time.now()
     if let timings = options.timings:
         let unpacked = run.unpacked.load()
