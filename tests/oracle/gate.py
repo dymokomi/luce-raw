@@ -48,7 +48,11 @@ def oracle_python():
     python = folder / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     if not python.exists():
         venv.create(folder, with_pip=True)
-    probe = subprocess.run([python, "-c", "import rawpy, numpy"], capture_output=True)
+    # Reinstall whenever the venv's rawpy is not the pinned one (tests/requirements.txt).
+    pinned = next(line.split("==")[1].strip() for line in (ROOT / "tests/requirements.txt").read_text().splitlines()
+                  if line.startswith("rawpy=="))
+    probe = subprocess.run([python, "-c", f"import numpy, rawpy; assert rawpy.__version__ == {pinned!r}"],
+                           capture_output=True)
     if probe.returncode != 0:
         run(python, "-m", "pip", "install", "-q", "-r", ROOT / "tests/requirements.txt")
     return python

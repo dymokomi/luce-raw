@@ -20,7 +20,8 @@ DRIVER = BUILD / "driver"
 # Camera space (before the color matrix) isolates levels, white balance and
 # demosaicing; sRGB adds the color model, where DNG differs by design: LibRaw
 # uses the D65 ColorMatrix alone, luce-raw the DNG SDK's interpolated matrices
-# and ForwardMatrix.
+# and ForwardMatrix. A camera LibRaw has no matrix for (rawpy's rgb_xyz_matrix all
+# zero) leaves LibRaw's sRGB as camera RGB, so its sRGB is not held to a limit.
 MEAN_LIMIT = {"camera": 0.0005, "dng": 0.012, "table": 0.001, "generic": 1.0}
 OUTLIER_LIMIT = {"camera": 0.001, "dng": 0.05, "table": 0.001, "generic": 1.0}
 
@@ -103,6 +104,7 @@ def check_develop(sample, out, matrix, space, mode="best"):
                                output_color=rawpy.ColorSpace.raw if space == "camera" else rawpy.ColorSpace.sRGB, gamma=(1, 1), no_auto_bright=True,
                                output_bps=16, highlight_mode=rawpy.HighlightMode.Clip,
                                adjust_maximum_thr=0.0, user_sat=None, bright=1.0)
+        unknown = space != "camera" and not r.rgb_xyz_matrix.any()
     theirs = theirs.astype(np.float32) / 65535.0
     if mode == "half" and theirs.shape[0] > 1.5 * h:
         # LibRaw's half_size leaves images without a color filter (LinearRaw)
@@ -119,9 +121,10 @@ def check_develop(sample, out, matrix, space, mode="best"):
     diff = np.abs(a - b)
     mean = float(diff.mean())
     outliers = float(np.mean(diff.max(axis=2) > 0.05))
-    kind = "camera" if space == "camera" else matrix
+    kind = "camera" if space == "camera" else "generic" if unknown else matrix
     ok = mean <= MEAN_LIMIT[kind] and outliers <= OUTLIER_LIMIT[kind]
-    return ok, f"{mode} {space} mean |diff| {mean:.5f}, >0.05 in {outliers * 100:.3f}%"
+    note = " (LibRaw has no matrix)" if unknown else ""
+    return ok, f"{mode} {space} mean |diff| {mean:.5f}, >0.05 in {outliers * 100:.3f}%{note}"
 
 
 def jpeg_area(data):

@@ -1,6 +1,7 @@
 # luce-raw against LibRaw: gate.py fetches the CC0 sample raws (tests/samples.json) into
 # build/samples, checks them by SHA-256, builds tests/driver.lucb and holds its sensor
-# samples and levels to LibRaw's through rawpy exactly and its developed image within
+# samples and levels to LibRaw 0.22.1's through rawpy 0.27.1 (pinned in
+# tests/requirements.txt) exactly and its developed image within
 # tolerance (tests/oracle.py), then times a 24 MP develop. LUCE_RAW_FUZZ=N adds N
 # corruption rounds per sample. Without a network for the first fetch it skips.
 from luce_std import process
