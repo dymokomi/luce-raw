@@ -1,0 +1,22 @@
+# luce-raw against LibRaw: gate.py fetches the CC0 sample raws (tests/samples.json) into
+# build/samples, checks them by SHA-256, builds tests/driver.lucb and holds its sensor
+# samples and levels to LibRaw's through rawpy exactly and its developed image within
+# tolerance (tests/oracle.py), then times a 24 MP develop. LUCE_RAW_FUZZ=N adds N
+# corruption rounds per sample. Without a network for the first fetch it skips.
+from luce_std import process
+
+let failed = ErrorCode.package(1)
+
+pub func main(arguments: list[str]) -> int!:
+    let here = process.variable("LUC_TEST_DIR") else "tests/oracle"
+    var words = [f"{here}/gate.py"]
+    if let rounds = process.variable("LUCE_RAW_FUZZ"):
+        words.append("--fuzz")
+        words.append(rounds)
+    let done = process.run("python3", words)
+    print(done.output.trim_end())
+    if done.exit_code == 77:
+        return 0
+    if done.exit_code != 0:
+        error(failed, f"gate.py: exit status {done.exit_code}\n{done.error_output}")
+    return 0

@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
-"""luce-raw's gate.
+"""luce-raw against LibRaw, run by tests/oracle/main.luc (`luc test`); the module's
+own test blocks run in `luc test` too.
 
-1. The module's test blocks in native and C modes: lossless JPEG and Huffman on
-   synthetic streams, synthetic DNGs, white balance, truncation and corruption.
-2. The sample raws (tests/samples.json, CC0 files from raw.pixls.us, fetched into
+1. The sample raws (tests/samples.json, CC0 files from raw.pixls.us, fetched into
    build/samples and checked by SHA-256) against LibRaw through rawpy, in a
    virtual environment under build/venv: sensor samples and levels exactly, the
    developed image within tolerance (tests/oracle.py).
-3. The time to develop a 24 MP raw.
+2. The time to develop a 24 MP raw.
 
---quick runs step 1 only; --fuzz N adds N corruption rounds per sample
-(tests/fuzz.py).
+--fuzz N adds N corruption rounds per sample (tests/fuzz.py). Exits 77 when the
+samples cannot be fetched (no network), which the program reports as a skip.
 """
 import argparse, hashlib, json, os, subprocess, sys, urllib.request, venv
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build"
-LOCAL = ROOT.parent / "luce/build/luce-base/build/luce-base"
-BASE = Path(os.environ.get("LUCE_BASE") or (LOCAL if LOCAL.exists() else ROOT.parent / "luce-base/build/luce-base")).resolve()
-ENV = dict(os.environ, LUCE_BASE=str(BASE), LUCE_STD=os.environ.get("LUCE_STD") or str((ROOT.parent / "luce-base/src/std").resolve()))
+BASE = os.environ.get("LUCE_BASE", "luce-base")
+ENV = dict(os.environ)
 
 
 def run(*command, **options):
@@ -34,8 +32,12 @@ def fetch_samples():
         if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == entry["sha256"]:
             continue
         print(f"fetching {entry['name']} ({entry['camera']})", flush=True)
-        with urllib.request.urlopen(entry["url"], timeout=600) as response:
-            data = response.read()
+        try:
+            with urllib.request.urlopen(entry["url"], timeout=600) as response:
+                data = response.read()
+        except OSError as failure:
+            print(f"skip: the sample raws cannot be fetched ({failure})", flush=True)
+            sys.exit(77)
         if hashlib.sha256(data).hexdigest() != entry["sha256"]:
             raise SystemExit(f"{entry['name']}: checksum mismatch")
         path.write_bytes(data)
@@ -54,14 +56,8 @@ def oracle_python():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--quick", action="store_true", help="unit tests only")
     parser.add_argument("--fuzz", type=int, default=0, help="corruption rounds per sample")
     args = parser.parse_args()
-    for flags in (["--native"], ["--backend=c"]):
-        run(BASE, "test", "src/raw", *flags, timeout=900)
-    if args.quick:
-        print("PASS luce-raw (unit tests)")
-        return
     BUILD.mkdir(exist_ok=True)
     run(BASE, "build", "tests/driver.lucb", "-o", BUILD / "driver", "--release", timeout=900)
     fetch_samples()

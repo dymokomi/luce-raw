@@ -5,7 +5,7 @@ For each sample: the sensor samples after linearization must equal LibRaw's
 raw_image exactly, with the same white level and black levels; the developed
 image (AHD, as-shot white balance, linear sRGB, no crop, no exposure) must
 agree with LibRaw's postprocess within the tolerances below. Run with the
-virtual environment tests/run.py prepares; prints one line per sample.
+virtual environment tests/oracle/gate.py prepares; prints one line per sample.
 """
 import json, os, subprocess, sys, time
 from pathlib import Path

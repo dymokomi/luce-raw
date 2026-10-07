@@ -172,9 +172,8 @@ auto-brightness, no crop):
 ## Tests
 
 ```
-./test.sh           # test blocks (native and C), then the samples against LibRaw
-./test.sh --quick   # test blocks only (what CI runs)
-./test.sh --fuzz 20 # also 20 corruption rounds per sample: errors, never traps
+luc test                  # test blocks, then the samples against LibRaw (tests/oracle)
+LUCE_RAW_FUZZ=20 luc test # also 20 corruption rounds per sample: errors, never traps
 ```
 
 The test blocks cover the lossless JPEG decoder (every predictor, one to four

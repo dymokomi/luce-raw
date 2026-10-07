@@ -1,4 +1,4 @@
-## The test driver tests/run.py builds: it decodes a raw with this package and
+## The test driver tests/oracle/gate.py builds: it decodes a raw with this package and
 ## writes what it found for the Python checks to compare with LibRaw.
 ##   driver info FILE
 ##   driver recognize FILE           whether it is developable, and a raw at all
