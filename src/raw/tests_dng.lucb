@@ -301,8 +301,8 @@ test "recognize knows raws this package cannot develop, and probe names them":
     assert(not recognize(plain.view()), "a Canon-made plain TIFF was taken for a raw")
     let crw = b"II\x1a\x00\x00\x00HEAPCCDR\x00\x00\x01\x00"
     assert(recognize(crw) and not detect(crw), "a CRW was not recognized as an undevelopable raw")
-    var message = ""
+    var own_message = false
     _ = info(crw) catch failure:
-        message = failure.message
+        own_message = failure.message == "Canon CRW raws are not supported"
         recover Info()
-    assert(message == "Canon CRW raws are not supported", "a CRW did not fail with its own message")
+    assert(own_message, "a CRW did not fail with its own message")
