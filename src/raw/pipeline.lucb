@@ -9,9 +9,10 @@
 #       they read exist: one `parallel` run whose first item is the unpack
 #       (which starts its own strip or plane threads) and whose other items, the
 #       level bands, the X-Trans green-range bands and the output tiles, are
-#       scheduled by the level band they need last, so work follows the rows
-#       down the sensor. An item waits only on earlier items, which are already
-#       running, so the run cannot stall. Rows arrive through a Progress (the slowest
+#       scheduled by the level band they need last (a tile: counting the range
+#       bands it waits on too), so work follows the rows down the sensor. An
+#       item waits only on earlier items, which are already running, so the run
+#       cannot stall. Rows arrive through a Progress (the slowest
 #       producer's row count); bands report through done flags. A failing
 #       item aborts the run: waiters wake and return quietly, and the failure
 #       is the one reported. Results equal the staged develop's exactly.
@@ -226,7 +227,16 @@ func schedule(run: const Pipeline*, count: usize) -> u32[]!:
         needs[1 + bands + band] = (u32)((rows - 1) // band_rows)
     for tile in 0..<count - 1 - bands - ranged:
         let rows = (usize)math.imin((i64)source_rows(run.tiles, tile).end + 32, (i64)height)
-        needs[1 + bands + ranged + tile] = (u32)(((rows - 1) // band_rows) if rows > 0 else 0)
+        var need = (u32)(((rows - 1) // band_rows) if rows > 0 else 0)
+        # An X-Trans tile also waits on the range bands over its rows, and a
+        # range band can need a later level band than the tile does: the tile
+        # goes after the latest of them, or every thread could hold a tile
+        # waiting on a range band none is left to run.
+        if ranged > 0 and rows > 0:
+            let last_range = (usize)math.imin((i64)((rows - 1) // band_height), (i64)ranged - 1)
+            for band in 0..=last_range:
+                need = need if need >= needs[1 + bands + band] else needs[1 + bands + band]
+        needs[1 + bands + ranged + tile] = need
     for band in 0..<bands:
         needs[1 + band] = (u32)band
     # A counting sort by that band keeps each stage's order within a band.
